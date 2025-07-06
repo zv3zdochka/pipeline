@@ -1,4 +1,4 @@
-# gru_train.py
+# train_GRU.py
 
 import warnings
 import joblib

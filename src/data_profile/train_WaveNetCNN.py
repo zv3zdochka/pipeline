@@ -1,4 +1,4 @@
-# wavecnn_train.py
+# train_WaveNetCNN.py
 import argparse
 import pathlib
 import joblib
@@ -9,8 +9,8 @@ from torch.utils.data import DataLoader
 from torch.nn.utils import clip_grad_norm_
 from sklearn.metrics import accuracy_score, f1_score
 
-from .data_cnn import CNNWindowDataset  # updated import path
-from .models.wave_cnn import WaveCNN
+from .prepare_dataset_CNN import CNNWindowDataset  # updated import path
+from .models.WaveNetCNN import WaveCNN
 
 
 def _make_loader(df, window, batch, shuffle):
