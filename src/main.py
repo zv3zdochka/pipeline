@@ -12,7 +12,7 @@ from data_profile import (
     prepare_1dcnn_df,
     train_gru,
     prepare_timesnet_dataset,
-    train_timesnet,
+
 )
 
 CACHE_DIR: pathlib.Path = pathlib.Path(__file__).parent / "cache"
@@ -52,7 +52,7 @@ def main() -> None:
         model_out=str(CACHE_DIR / "wavecnn_model.pt"),
         emb_out=str(CACHE_DIR / "cnn_embeddings.parquet"),
         window=24,
-        epochs=3,
+        epochs=1,
         batch=256,
     )
     gru_ds = prepare_gru_dataset(
@@ -70,7 +70,7 @@ def main() -> None:
         model_out=str(CACHE_DIR / "gru_model.pt"),
         emb_out=str(CACHE_DIR / "gru_embeddings.parquet"),
         seq_len=96,
-        epochs=3,
+        epochs=1,
         batch_size=128,
         lr=3e-4,
     )
@@ -82,16 +82,6 @@ def main() -> None:
         dataset_path=CACHE_DIR / "timesnet_dataset.pt",
     )
     print(f"[INFO] TimesNet dataset: {len(tn_ds)} windows of 288×{tn_ds[0][0].shape[1]}")
-    train_timesnet(
-        dataset_path=str(CACHE_DIR / "timesnet_dataset.pt"),
-        model_out=str(CACHE_DIR / "timesnet_model.pt"),
-        scaler_path=str(CACHE_DIR / "timesnet_scaler.pkl"),
-        seq_len=288,
-        horizon=288,
-        batch=128,
-        epochs=3,
-        lr=1e-3,
-    )
 
 
 if __name__ == "__main__":

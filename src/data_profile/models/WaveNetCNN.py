@@ -1,4 +1,4 @@
-# models/wave_ccn.py
+# models/WaveNetCNN.py
 import torch.nn as nn
 import torch.nn.functional as F
 

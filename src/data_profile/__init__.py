@@ -21,14 +21,12 @@ __all__ = [
     "train_gru"
 ]
 
-from .data_timesnet import (
+from .prepare_dataset_TimesNet import (
     prepare_timesnet_dataset,
     TimesNetDataset,
-    train_timesnet,
 )
 
 __all__ += [
     "prepare_timesnet_dataset",
     "TimesNetDataset",
-    "train_timesnet",
 ]
