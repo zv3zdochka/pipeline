@@ -1,4 +1,6 @@
 # prepare_dataset_TimesNet.py
+import pathlib
+
 import pandas as pd
 import numpy as np
 import torch
@@ -31,8 +33,8 @@ def prepare_timesnet_dataset(
         seq_len: int = 288,
         horizon: int = 288,
         feature_cols: list = None,
-        scaler_path: str = "timesnet_scaler.pkl",
-        dataset_path: str = "timesnet_dataset.pt"
+        scaler_path: pathlib.Path = "timesnet_scaler.pkl",
+        dataset_path: pathlib.Path = "timesnet_dataset.pt"
 ):
     """
     Prepare data for TimesNet:
