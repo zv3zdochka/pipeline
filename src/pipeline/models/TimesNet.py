@@ -1,4 +1,4 @@
-# src/data_profile/models/TimesNet.py
+# src/pipeline/models/TimesNet.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

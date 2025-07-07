@@ -1,4 +1,4 @@
-# src/data_profile/train_TimesNet.py
+# src/pipeline/train_TimesNet.py
 import warnings, pathlib, joblib, torch, pandas as pd
 import torch.nn as nn
 from torch.utils.data import DataLoader

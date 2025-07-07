@@ -3,7 +3,7 @@ import pathlib
 import pandas as pd
 import joblib
 
-from data_profile import (
+from pipeline import (
     impute_missing,
     prepare_tft_features,
     label_microtrend,
@@ -13,7 +13,7 @@ from data_profile import (
     train_gru,
     prepare_timesnet_dataset,
 )
-from data_profile.train_TimesNet import train_timesnet  # наша реализация
+from pipeline.train_TimesNet import train_timesnet  # наша реализация
 
 CACHE_DIR = pathlib.Path(__file__).parent / "cache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
