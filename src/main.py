@@ -12,8 +12,10 @@ from pipeline import (
     prepare_gru_dataset,
     train_gru,
     prepare_timesnet_dataset,
+    train_timesnet,
+    prepare_tft_dataset,
+    train_tft
 )
-from pipeline.train_TimesNet import train_timesnet  # наша реализация
 
 CACHE_DIR = pathlib.Path(__file__).parent / "cache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -36,7 +38,7 @@ def main() -> None:
     df_tft["microtrend_label"] = label_microtrend(df_tft)
     df_tft.to_csv(TFT_CSV, index=False)
     joblib.dump(df_tft, CACHE_DIR / "imputed_events.pkl")
-    print("[MAIN] Prepared TFT features and labels.")
+    print("[MAIN] Prepared features and labels.")
 
     # ------------------------------------------------------------------ #
     # 3. Wavelet + 1D-CNN
@@ -124,6 +126,36 @@ def main() -> None:
         .reset_index()
     )
     print("[MAIN] Added timesnet_pred and timesnet_emb to df_tft.")
+
+    # ------------------------------------------------------------------ #
+    # 7. Подготовка TFT
+    # ------------------------------------------------------------------ #
+
+    ds, groups = prepare_tft_dataset(
+        df_events="cache/imputed_events.pkl",
+        cnn_emb_path="cache/cnn_embeddings.parquet",
+        gru_emb_path="cache/gru_embeddings.parquet",
+        timesnet_emb_path="cache/timesnet_embeddings.parquet",
+        timesnet_pred_path="cache/timesnet_forecast.parquet",
+        seq_len=96,
+        dataset_path="cache/tft_dataset.pt",
+        scaler_path="cache/tft_scaler.pkl",
+    )
+
+    # ----------  СОХРАНЯЕМ ГРУППЫ ФИЧЕЙ ----------
+    joblib.dump(groups, "cache/tft_feature_groups.pkl")
+
+    print(len(ds), groups)
+
+    train_tft(
+        dataset_pt="cache/tft_dataset.pt",
+        feature_groups_pkl="cache/tft_feature_groups.pkl",
+        class_freqs_pt="cache/class_freqs.pt",
+        model_out="cache/tft_model.pt",
+        emb_out="cache/tft_embeddings.parquet",
+        epochs=5,
+        batch_size=128,
+    )
 
 
 if __name__ == "__main__":
