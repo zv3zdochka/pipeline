@@ -15,21 +15,19 @@ from pipeline import (
     train_timesnet,
     prepare_tft_dataset,
     train_tft,
-    train_ppo
 )
+from pipeline.train_PPO import train_ppo  # ← добавлено
 
 CACHE_DIR = pathlib.Path(__file__).parent / "cache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 CSV_PATH = pathlib.Path(__file__).parent.parent / "data" / "BTCUSDT_merge_30d.csv"
-TFT_CSV = CACHE_DIR / "TFT.csv"
-
 
 def main() -> None:
     # ------------------------------------------------------------------ #
     # 1. Загрузка сырых данных и imputation
     # ------------------------------------------------------------------ #
-    df = pd.read_csv(CSV_PATH)
+    df = pd.read_csv(CSV_PATH, parse_dates=["ts"])
     df = impute_missing(df)
 
     # ------------------------------------------------------------------ #
@@ -37,7 +35,7 @@ def main() -> None:
     # ------------------------------------------------------------------ #
     df_tft = prepare_tft_features(df)
     df_tft["microtrend_label"] = label_microtrend(df_tft)
-    df_tft.to_csv(TFT_CSV, index=False)
+    df_tft.to_csv(CACHE_DIR / "TFT.csv", index=False)
     joblib.dump(df_tft, CACHE_DIR / "imputed_events.pkl")
     print("[MAIN] Prepared features and labels.")
 
@@ -87,20 +85,15 @@ def main() -> None:
     )
 
     # ------------------------------------------------------------------ #
-    # 5. TimesNet: подготовка датасета
+    # 5. TimesNet: подготовка и обучение
     # ------------------------------------------------------------------ #
-    tn_ds, _ = prepare_timesnet_dataset(
+    _, _ = prepare_timesnet_dataset(
         df_tft,
         seq_len=288,
         horizon=288,
         scaler_path=CACHE_DIR / "timesnet_scaler.pkl",
         dataset_path=CACHE_DIR / "timesnet_dataset.pt",
     )
-    print(f"[MAIN] TimesNet dataset prepared: {len(tn_ds)} windows.")
-
-    # ------------------------------------------------------------------ #
-    # 6. TimesNet: обучение, сохранение модели, эмбеддингов и прогнозов
-    # ------------------------------------------------------------------ #
     train_timesnet(
         dataset_pt=str(CACHE_DIR / "timesnet_dataset.pt"),
         events_pkl=str(CACHE_DIR / "imputed_events.pkl"),
@@ -114,11 +107,11 @@ def main() -> None:
     )
 
     # ------------------------------------------------------------------ #
-    # 7. Интеграция прогнозов и эмбеддингов TimesNet
+    # 6. Собираем TFT-датасет и обучаем TFT
     # ------------------------------------------------------------------ #
+    # интеграция TimesNet
     tn_pred = pd.read_parquet(CACHE_DIR / "timesnet_forecast.parquet")
     tn_emb = pd.read_parquet(CACHE_DIR / "timesnet_embeddings.parquet")
-    # Объединяем по индексу ts
     df_tft = (
         df_tft
         .set_index("ts")
@@ -126,46 +119,42 @@ def main() -> None:
         .join(tn_emb)
         .reset_index()
     )
-    print("[MAIN] Added timesnet_pred and timesnet_emb to df_tft.")
-
-    # ------------------------------------------------------------------ #
-    # 7. Подготовка TFT
-    # ------------------------------------------------------------------ #
 
     ds, groups = prepare_tft_dataset(
-        df_events="cache/imputed_events.pkl",
-        cnn_emb_path="cache/cnn_embeddings.parquet",
-        gru_emb_path="cache/gru_embeddings.parquet",
-        timesnet_emb_path="cache/timesnet_embeddings.parquet",
-        timesnet_pred_path="cache/timesnet_forecast.parquet",
+        df_events=CACHE_DIR / "imputed_events.pkl",
+        cnn_emb_path=CACHE_DIR / "cnn_embeddings.parquet",
+        gru_emb_path=CACHE_DIR / "gru_embeddings.parquet",
+        timesnet_emb_path=CACHE_DIR / "timesnet_embeddings.parquet",
+        timesnet_pred_path=CACHE_DIR / "timesnet_forecast.parquet",
         seq_len=96,
-        dataset_path="cache/tft_dataset.pt",
-        scaler_path="cache/tft_scaler.pkl",
+        dataset_path=CACHE_DIR / "tft_dataset.pt",
+        scaler_path=CACHE_DIR / "tft_scaler.pkl",
     )
-
-    # ----------  СОХРАНЯЕМ ГРУППЫ ФИЧЕЙ ----------
-    joblib.dump(groups, "cache/tft_feature_groups.pkl")
-
-    print(len(ds), groups)
+    joblib.dump(groups, CACHE_DIR / "tft_feature_groups.pkl")
 
     train_tft(
-        dataset_pt="cache/tft_dataset.pt",
-        feature_groups_pkl="cache/tft_feature_groups.pkl",
-        class_freqs_pt="cache/class_freqs.pt",
-        model_out="cache/tft_model.pt",
-        emb_out="cache/tft_embeddings.parquet",
+        dataset_pt=CACHE_DIR / "tft_dataset.pt",
+        feature_groups_pkl=CACHE_DIR / "tft_feature_groups.pkl",
+        class_freqs_pt=CACHE_DIR / "class_freqs.pt",
+        model_out=CACHE_DIR / "tft_model.pt",
+        emb_out=CACHE_DIR / "tft_embeddings.parquet",
         epochs=5,
         batch_size=128,
+        lr=3e-4,
     )
 
-    train_ppo(
-        emb_path=str(CACHE_DIR / "tft_embeddings.parquet"),
-        csv_path=str(CSV_PATH),  # ← csv_path, не csv_raw
+    # ------------------------------------------------------------------ #
+    # 7. PPO + Kelly Criterion
+    # ------------------------------------------------------------------ #
+    acc, kelly = train_ppo(
+        emb_path=CACHE_DIR / "tft_embeddings.parquet",
+        csv_path=CSV_PATH,
         price_col="ohlcv_5m_close",
-        model_out=str(CACHE_DIR / "ppo_trading.zip"),
-        total_timesteps=25,
+        model_out=CACHE_DIR / "ppo_trading.zip",
+        total_timesteps=20000,
     )
-
+    print(f"[MAIN] PPO direction-accuracy: {acc*100:.2f}%")
+    print(f"[MAIN] PPO Kelly fraction  : {kelly:.3f}")
 
 if __name__ == "__main__":
     main()

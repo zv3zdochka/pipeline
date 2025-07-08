@@ -1,89 +1,118 @@
 # src/pipeline/rl/trading_env.py
+
 from __future__ import annotations
-import numpy as np
 import gym
+import numpy as np
 from gym import spaces
+
+from ..kelly import kelly_fraction
 
 
 class TradingEnv(gym.Env):
     """
-    Gymnasium-style среда для PPO:
-    - observation: TFT-embedding + текущая позиция
-    - action_space: Discrete(4): 0=hold, 1=long, 2=short, 3=close
-    - reward: PnL между шагами минус комиссия
+    Мини-среда для PPO:
+      • obs      = TFT-эмбеддинг (np.ndarray dim_emb)
+      • price    = close-price (float32)
+      • action   = {0=flat,1=long,2=short}
+      • reward   = ΔPNL (% от equity) с учётом Kelly-фракции
     """
+
     metadata = {"render.modes": []}
 
     def __init__(
         self,
-        embeddings: np.ndarray,
-        prices: np.ndarray,
-        initial_balance: float = 1.0,
-        fee: float = 0.0004,
+        embeddings: np.ndarray,  # (T, D)
+        prices: np.ndarray,      # (T,)
+        *,
+        odds_estimate: float = 2.0,
+        kelly_coeff: float = 0.5,
+        p_smooth: float = 0.95,
     ):
         super().__init__()
-        assert len(embeddings) == len(prices), "embeddings и prices разной длины"
-        self.embeddings = embeddings.astype(np.float32)
-        self.prices = prices.astype(np.float32)
-        self.n_steps = len(prices)
+        assert len(embeddings) == len(prices)
+        self.emb = embeddings.astype(np.float32)
+        self.price = prices.astype(np.float32)
+        self.T, self.D = self.emb.shape
 
-        obs_dim = self.embeddings.shape[1] + 1
+        # action / obs spaces
+        self.action_space = spaces.Discrete(3)  # 0=flat,1=long,2=short
         self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
+            -np.inf, np.inf, shape=(self.D,), dtype=np.float32
         )
-        self.action_space = spaces.Discrete(4)
 
-        self.initial_balance = initial_balance
-        self.fee = fee
-        self.reset()
+        # Kelly params
+        self.odds = odds_estimate
+        self.kelly_coeff = kelly_coeff
+        self.p_smooth = p_smooth
+        self._p_win = 0.5
 
-    def reset(self, *, seed: int | None = None, **kwargs):
+        # internal
+        self._idx = 0
+        self._pos = 0           # -1,0,+1
+        self._entry_price = 0.0
+        self._kelly_f = 0.0
+
+    def _update_p_win(self, reward: float):
+        success = 1.0 if reward > 0 else 0.0
+        self._p_win = self.p_smooth * self._p_win + (1 - self.p_smooth) * success
+
+    def reset(self, *, seed: int | None = None, options=None):
         super().reset(seed=seed)
-        self.step_idx = 0
-        self.position = 0       # -1, 0, +1
-        self.entry_price = 0.0
-        obs = self._get_obs()
-        return obs, {}          # Gymnasium API: (obs, info)
+        self._idx = 0
+        self._pos = 0
+        self._entry_price = 0.0
+        self._kelly_f = 0.0
+        self._p_win = 0.5
+        return self.emb[0], {}
 
-    def step(self, action: int):
-        price = self.prices[self.step_idx]
-        reward = 0.0
+    def step(self, action_int: int):
+        """
+        Теперь сначала применяем action, потом переходим к next_idx
+        и считаем reward по новой позиции.
+        Возвращаем (obs, reward, terminated, truncated, info).
+        """
+        # исходная цена текущего шага
+        cur_price = self.price[self._idx]
 
-        # выполнение действия
-        if action == 1:  # open long
-            if self.position == 0:
-                self.entry_price = price
-            self.position = 1
-        elif action == 2:  # open short
-            if self.position == 0:
-                self.entry_price = price
-            self.position = -1
-        elif action == 3 and self.position != 0:  # close position
-            reward += self._pnl(price) - self.fee
-            self.position = 0
-            self.entry_price = 0.0
+        # применяем действие
+        if action_int == 0:
+            self._pos = 0
+        elif action_int == 1:
+            if self._pos != 1:
+                self._pos = 1
+                self._entry_price = cur_price
+        else:  # action_int == 2
+            if self._pos != -1:
+                self._pos = -1
+                self._entry_price = cur_price
 
-        # отметим переход
-        self.step_idx += 1
-        terminated = self.step_idx >= self.n_steps - 1
+        # переходим к следующей свече
+        next_idx = self._idx + 1
+        done = next_idx >= self.T - 1
+        new_price = self.price[next_idx]
 
-        # марк-то-маркет PnL, если остались в позиции
-        if not terminated and self.position != 0:
-            reward += self._pnl(self.prices[self.step_idx]) - self.fee
+        # считаем P/L с учётом Kelly-фракции
+        if self._pos == 0:
+            reward = 0.0
+        else:
+            pnl = (new_price - self._entry_price) / self._entry_price
+            pnl *= -1.0 if self._pos == -1 else 1.0
+            reward = pnl * self._kelly_f
 
-        obs = self._get_obs()
-        info = {}
+        # обновляем оценку p_win и Kelly-фракцию для следующих шагов
+        self._update_p_win(reward)
+        self._kelly_f = (
+            kelly_fraction(self._p_win, self.odds, self.kelly_coeff)
+            if self._pos != 0
+            else 0.0
+        )
 
-        # Gymnasium API expects (obs, reward, terminated, truncated, info)
-        truncated = False
-        return obs, reward, terminated, truncated, info
+        # сохраняем индекс, подготавливаем obs/info
+        self._idx = next_idx
+        obs = self.emb[self._idx]
+        info = {"kelly_f": self._kelly_f, "pos": int(self._pos), "step": int(self._idx)}
 
-    def _get_obs(self):
-        emb = self.embeddings[self.step_idx]
-        return np.concatenate([emb, [self.position]], dtype=np.float32)
+        return obs, float(reward), done, False, info
 
-    def _pnl(self, exit_price: float) -> float:
-        if self.position == 0:
-            return 0.0
-        direction = 1.0 if self.position == 1 else -1.0
-        return direction * (exit_price / self.entry_price - 1.0)
+    def render(self):
+        pass

@@ -14,7 +14,7 @@ from .train_TimesNet import train_timesnet
 from .prepare_dataset_TFT import prepare_tft_dataset
 from .train_TFT import train_tft
 
-from .train_PPO import train_ppo
+from .train_PPO import train_ppo  # ← добавлено
 
 __all__ = [
     "analyze_csv",
@@ -32,5 +32,5 @@ __all__ = [
     "train_timesnet",
     "prepare_tft_dataset",
     "train_tft",
-    "train_ppo"
+    "train_ppo",  # ← добавлено
 ]
