@@ -14,7 +14,8 @@ from pipeline import (
     prepare_timesnet_dataset,
     train_timesnet,
     prepare_tft_dataset,
-    train_tft
+    train_tft,
+    train_ppo
 )
 
 CACHE_DIR = pathlib.Path(__file__).parent / "cache"
@@ -155,6 +156,14 @@ def main() -> None:
         emb_out="cache/tft_embeddings.parquet",
         epochs=5,
         batch_size=128,
+    )
+
+    train_ppo(
+        emb_path=str(CACHE_DIR / "tft_embeddings.parquet"),
+        csv_path=str(CSV_PATH),  # ← csv_path, не csv_raw
+        price_col="ohlcv_5m_close",
+        model_out=str(CACHE_DIR / "ppo_trading.zip"),
+        total_timesteps=25,
     )
 
 
