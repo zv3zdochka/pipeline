@@ -12,7 +12,7 @@ def _rsi(series: pd.Series, period: int = 14) -> pd.Series:
     return 100 - (100 / (1 + rs))
 
 
-def prepare_tft_features(df: pd.DataFrame) -> pd.DataFrame:
+def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Строит мульти-TF индикаторы для TFT — 5/15/30/60 мин + cross-TF,
     добавляет флаги пропусков, кодирует категории, заполняет пропуски и возвращает DF с индексом ts.

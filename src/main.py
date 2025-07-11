@@ -5,7 +5,7 @@ import joblib
 
 from pipeline import (
     impute_missing,
-    prepare_tft_features,
+    prepare_features,
     label_microtrend,
     prepare_1dcnn_df,
     train_wavecnn,
@@ -15,39 +15,54 @@ from pipeline import (
     train_timesnet,
     prepare_tft_dataset,
     train_tft,
-    analyze_csv
+    print_dataset_overview
 )
 from pipeline.train_PPO import train_ppo  # ← добавлено
 
 CACHE_DIR = pathlib.Path(__file__).parent / "cache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-CSV_PATH = pathlib.Path(__file__).parent.parent / "data" / "BTCUSDT_merge_30d.csv"
+CSV_PATH = pathlib.Path(__file__).parent.parent / "data" / "XRPUSDT_merge_180d.csv"
 
 
 def main() -> None:
-    # ------------------------------------------------------------------ #
-    # 1. Загрузка сырых данных и imputation
-    # ------------------------------------------------------------------ #
-    df = pd.read_csv(CSV_PATH, parse_dates=["ts"])
+
+
+    print("[MAIN] Step 1: Loading raw data and imputing missing values...")
+    df = pd.read_csv(CSV_PATH, parse_dates=["ts"], low_memory=False)
+    print(f"[MAIN] Loaded data: {df.shape[0]} rows, {df.shape[1]} columns")
+
     df = impute_missing(df)
+    print(f"[PREPROCESS] After imputation: {df.isna().sum().sum()} total missing values remain")
+
     df.to_csv(CACHE_DIR / "data.csv", index=False)
-    analyze_csv(CACHE_DIR / "data.csv")
+    print(f"[MAIN] Cached imputed data to {CACHE_DIR / 'data.csv'}")
+
+    print_dataset_overview(df)
+
+
+    # 2. Prepare features and microtrend labels
+    print("[MAIN] Step 2: Preparing features and microtrend labels...")
+    dataset = prepare_features(df)
+    print(f"[FEATURES] Features prepared: {dataset.shape[1]} features for {dataset.shape[0]} rows")
+
+    dataset["microtrend_label"] = label_microtrend(dataset)
+    print(f"[MICROTREND] Assigned microtrend labels: {dataset['microtrend_label'].nunique()} unique labels")
+
+    # Save outputs
+    dataset.to_csv(CACHE_DIR / "TFT.csv", index=False)
+    joblib.dump(dataset, CACHE_DIR / "imputed_events.pkl")
+    print(f"[MAIN] Saved TFT data to {CACHE_DIR / 'TFT.csv'} and pickle to imputed_events.pkl")
+
+    print("[MAIN] All steps completed successfully.")
+
     exit()
-    # ------------------------------------------------------------------ #
-    # 2. TFT-фичи и метки микротренда
-    # ------------------------------------------------------------------ #
-    df_tft = prepare_tft_features(df)
-    df_tft["microtrend_label"] = label_microtrend(df_tft)
-    df_tft.to_csv(CACHE_DIR / "TFT.csv", index=False)
-    joblib.dump(df_tft, CACHE_DIR / "imputed_events.pkl")
-    print("[MAIN] Prepared features and labels.")
 
     # ------------------------------------------------------------------ #
     # 3. Wavelet + 1D-CNN
     # ------------------------------------------------------------------ #
     prepare_1dcnn_df(
-        df_tft,
+        dataset,
         wavelet="db4",
         level=3,
         window_size=24,
@@ -92,7 +107,7 @@ def main() -> None:
     # 5. TimesNet: подготовка и обучение
     # ------------------------------------------------------------------ #
     _, _ = prepare_timesnet_dataset(
-        df_tft,
+        dataset,
         seq_len=288,
         horizon=288,
         scaler_path=CACHE_DIR / "timesnet_scaler.pkl",
@@ -116,8 +131,8 @@ def main() -> None:
     # интеграция TimesNet
     tn_pred = pd.read_parquet(CACHE_DIR / "timesnet_forecast.parquet")
     tn_emb = pd.read_parquet(CACHE_DIR / "timesnet_embeddings.parquet")
-    df_tft = (
-        df_tft
+    dataset = (
+        dataset
         .set_index("ts")
         .join(tn_pred)
         .join(tn_emb)

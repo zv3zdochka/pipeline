@@ -1,65 +1,52 @@
-# analyze_dataset.py
-
 import pandas as pd
-from typing import Optional, Dict, Any
+from tabulate import tabulate
 
 
-def analyze_df(df: pd.DataFrame) -> None:
+def print_dataset_overview(df: pd.DataFrame) -> None:
     """
-    Analyze a loaded DataFrame:
-     - column dtypes
-     - number of non-null vs null
-     - number of unique values
-     - memory usage
-     - basic examples (first 2 non-null for each)
+    Print detailed DataFrame overview:
+    - shape and memory usage
+    - summary by dtype: number of columns, total and percent missing, average and median unique values
+    - top 5 columns by missing values
+    - total missing and unique values
     """
-    # overall memory
-    total_mem_mb = df.memory_usage(deep=True).sum() / 1e6
-    print(f"DataFrame memory footprint: {total_mem_mb:.2f} MB\n")
+    rows, cols = df.shape
+    mem_mb = df.memory_usage(deep=True).sum() / (1024 ** 2)
+    print(f"[INFO] DataFrame shape: {rows} rows, {cols} columns")
+    print(f"[INFO] Memory usage: {mem_mb:.2f} MB")
 
-    # per-column summary
-    info = []
-    for col in df.columns:
-        s = df[col]
-        non_null = s.notna().sum()
-        nulls = len(s) - non_null
-        unique = s.nunique(dropna=True)
-        example_vals = s.dropna().head(2).tolist() or [None]
-        info.append({
-            "column": col,
-            "dtype": str(s.dtype),
-            "non_null": non_null,
-            "nulls": nulls,
-            "unique": unique,
-            "examples": example_vals
-        })
-    summary = pd.DataFrame(info)
-    print(summary.to_markdown(index=False))
+    col_info = pd.DataFrame({
+        'column': df.columns,
+        'dtype': df.dtypes.astype(str).values,
+        'missing': df.isna().sum().values,
+        'unique': df.nunique(dropna=False).values
+    })
 
+    summary = (
+        col_info.groupby('dtype')
+        .agg(
+            num_cols=('column', 'count'),
+            total_missing=('missing', 'sum'),
+            avg_unique=('unique', 'mean'),
+            med_unique=('unique', 'median')
+        )
+        .reset_index()
+    )
+    summary['pct_missing'] = (summary['total_missing'] / (rows * summary['num_cols']) * 100).round(2)
 
-def analyze_csv(
-        path: str,
-        dtypes: Optional[Dict[str, Any]] = None,
-        **read_csv_kwargs
-) -> pd.DataFrame:
-    """
-    Read a CSV with optional explicit dtypes, analyze it,
-    and return the loaded DataFrame.
+    print("\n[SUMMARY BY DTYPE]")
+    print(tabulate(summary, headers='keys', tablefmt='github', showindex=False))
 
-    Parameters
-    ----------
-    path : str
-        Path to the CSV file.
-    dtypes : dict, optional
-        Column name → dtype mapping for pd.read_csv.
-    **read_csv_kwargs
-        Any additional kwargs to pass to pd.read_csv
-        (e.g. parse_dates, nrows, usecols).
-    """
-    print(f"Loading '{path}' with dtypes={bool(dtypes)} and options={read_csv_kwargs}")
-    df = pd.read_csv(path, dtype=dtypes or {}, **read_csv_kwargs)
-    print("\n=== DataFrame Overview ===")
-    analyze_df(df)
-    print("\n=== First 2 Rows Preview ===")
-    print(df.head(2).to_markdown())
-    return df
+    top_missing = col_info.sort_values('missing', ascending=False).head(5)
+    print("\n[TOP 5 COLUMNS BY MISSING VALUES]")
+    print(tabulate(
+        top_missing[['column', 'dtype', 'missing', 'unique']],
+        headers=['Column', 'Dtype', 'Missing', 'Unique'],
+        tablefmt='github',
+        showindex=False
+    ))
+
+    total_missing = col_info['missing'].sum()
+    total_unique = col_info['unique'].sum()
+    print(f"\n[INFO] Total missing values: {total_missing}")
+    print(f"[INFO] Total unique values across all columns: {total_unique}")
