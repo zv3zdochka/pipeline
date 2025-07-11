@@ -1,6 +1,6 @@
 from .analyze_dataset import print_dataset_overview
 from .preprocess_dataset import impute_missing
-from .extract_features import prepare_features, label_microtrend
+from .extract_features import prepare_features, label_microtrend, save_dataset_and_distribution
 
 from .prepare_dataset_CNN import prepare_1dcnn_df, CNNWindowDataset
 from .train_WaveNetCNN import train_wavecnn
@@ -14,7 +14,7 @@ from .train_TimesNet import train_timesnet
 from .prepare_dataset_TFT import prepare_tft_dataset
 from .train_TFT import train_tft
 
-from .train_PPO import train_ppo  # ← добавлено
+from .train_PPO import train_ppo
 
 __all__ = [
     "print_dataset_overview",
@@ -31,5 +31,6 @@ __all__ = [
     "train_timesnet",
     "prepare_tft_dataset",
     "train_tft",
-    "train_ppo",  # ← добавлено
+    "train_ppo",
+    "save_dataset_and_distribution"
 ]

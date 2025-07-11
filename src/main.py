@@ -15,9 +15,10 @@ from pipeline import (
     train_timesnet,
     prepare_tft_dataset,
     train_tft,
-    print_dataset_overview
+    print_dataset_overview,
+    save_dataset_and_distribution,
+    train_ppo
 )
-from pipeline.train_PPO import train_ppo  # ← добавлено
 
 CACHE_DIR = pathlib.Path(__file__).parent / "cache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -26,8 +27,6 @@ CSV_PATH = pathlib.Path(__file__).parent.parent / "data" / "XRPUSDT_merge_180d.c
 
 
 def main() -> None:
-
-
     print("[MAIN] Step 1: Loading raw data and imputing missing values...")
     df = pd.read_csv(CSV_PATH, parse_dates=["ts"], low_memory=False)
     print(f"[MAIN] Loaded data: {df.shape[0]} rows, {df.shape[1]} columns")
@@ -40,14 +39,14 @@ def main() -> None:
 
     print_dataset_overview(df)
 
-
     # 2. Prepare features and microtrend labels
     print("[MAIN] Step 2: Preparing features and microtrend labels...")
     dataset = prepare_features(df)
     print(f"[FEATURES] Features prepared: {dataset.shape[1]} features for {dataset.shape[0]} rows")
 
-    dataset["microtrend_label"] = label_microtrend(dataset)
+    dataset['microtrend_label'] = label_microtrend(dataset, window=3, threshold=0.03)
     print(f"[MICROTREND] Assigned microtrend labels: {dataset['microtrend_label'].nunique()} unique labels")
+    save_dataset_and_distribution(dataset)
 
     # Save outputs
     dataset.to_csv(CACHE_DIR / "TFT.csv", index=False)
