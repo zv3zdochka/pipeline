@@ -15,6 +15,7 @@ from pipeline import (
     train_timesnet,
     prepare_tft_dataset,
     train_tft,
+    analyze_csv
 )
 from pipeline.train_PPO import train_ppo  # ← добавлено
 
@@ -23,13 +24,16 @@ CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 CSV_PATH = pathlib.Path(__file__).parent.parent / "data" / "BTCUSDT_merge_30d.csv"
 
+
 def main() -> None:
     # ------------------------------------------------------------------ #
     # 1. Загрузка сырых данных и imputation
     # ------------------------------------------------------------------ #
     df = pd.read_csv(CSV_PATH, parse_dates=["ts"])
     df = impute_missing(df)
-
+    df.to_csv(CACHE_DIR / "data.csv", index=False)
+    analyze_csv(CACHE_DIR / "data.csv")
+    exit()
     # ------------------------------------------------------------------ #
     # 2. TFT-фичи и метки микротренда
     # ------------------------------------------------------------------ #
@@ -153,8 +157,9 @@ def main() -> None:
         model_out=CACHE_DIR / "ppo_trading.zip",
         total_timesteps=20000,
     )
-    print(f"[MAIN] PPO direction-accuracy: {acc*100:.2f}%")
+    print(f"[MAIN] PPO direction-accuracy: {acc * 100:.2f}%")
     print(f"[MAIN] PPO Kelly fraction  : {kelly:.3f}")
+
 
 if __name__ == "__main__":
     main()
