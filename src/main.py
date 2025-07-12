@@ -66,7 +66,7 @@ def main() -> None:
 
     print(f"[DISTRIBUTION] {dist}")
 
-    dataset = expand_dataset(dataset, n=6, noise_sigma=0.003)
+    dataset = expand_dataset(dataset, n=15, noise_sigma=0.003)
     dataset.to_csv(f"{CACHE_DIR / 'dataset.csv'}", index=False)
 
     dist_aug = dataset['microtrend_label'].value_counts().sort_index()
@@ -102,21 +102,19 @@ def main() -> None:
           f"{CACHE_DIR / 'wavecnn_dataset_train.pkl'} & {CACHE_DIR / 'wavecnn_dataset_test.pkl'}")
     print(f"[WAVECNN] Class frequencies written to → {CACHE_DIR / 'class_freqs.pt'}")
     print(f"[WAVECNN] START WAVECNN TRAINING")
-
     train_wavecnn(
         train_pkl=str(CACHE_DIR / "wavecnn_dataset_train.pkl"),
         test_pkl=str(CACHE_DIR / "wavecnn_dataset_test.pkl"),
         model_out=str(CACHE_DIR / "wavecnn_model.pt"),
-        emb_out=str(CACHE_DIR / "cnn_embeddings.parquet"),
+        emb_train_out=str(CACHE_DIR / "cnn_embeddings.parquet"),  # единый выход
+        emb_test_out=None,
         window=48,
         epochs=30,
         batch=256,
-        lr=3e-4,
+        lr=1e-4,
     )
 
-    print(f"[WAVECNN] FINISH WAVECNN TRAINING")
     print("[GRU] Preparing GRU dataset")
-
     prepare_gru_dataset(
         events_pkl=CACHE_DIR / "imputed_events.pkl",
         emb_path=CACHE_DIR / "cnn_embeddings.parquet",
@@ -145,6 +143,8 @@ def main() -> None:
         patience=3,
     )
     print("[GRU] Done")
+    exit()
+
     print("[TIMESNET] DATA PREP STARTED")
 
     prepare_timesnet_dataset(
@@ -167,7 +167,7 @@ def main() -> None:
         forecast_out=str(CACHE_DIR / "timesnet_forecast.parquet"),
         seq_len=288,
         epochs=5,
-        batch_size=256,
+        batch_size=512,
         lr=3e-4,
     )
     print(f"[TIMESNET] Training completed")

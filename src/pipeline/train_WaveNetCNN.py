@@ -1,214 +1,156 @@
 # src/pipeline/train_WaveNetCNN.py
 from __future__ import annotations
-
-import functools
-import pathlib
-import warnings
-
-import joblib
-import numpy as np
-import pandas as pd
-import torch
+import functools, pathlib, warnings, joblib
+import numpy as np, pandas as pd, torch
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR, SequentialLR, LinearLR
 from torch.nn.utils import clip_grad_norm_
 from torchmetrics import Accuracy, F1Score
 from torch.utils.tensorboard import SummaryWriter
 from torch.nn.functional import cross_entropy
-
 from .prepare_dataset_CNN import CNNWindowDataset
 from .models.WaveNetCNN import WaveCNN
 
 
-# --------------------------------------------------------------------- #
-#                               LOSSES                                  #
-# --------------------------------------------------------------------- #
-def focal_loss(
-    logits: torch.Tensor,
-    target: torch.Tensor,
-    *,
-    gamma: float = 2.0,
-    alpha: list[float] | tuple[float, ...] | None = None,
-) -> torch.Tensor:
-    """
-    Focal loss со взвешиванием классов (alpha) и фокус-фактором gamma.
-    При alpha=None используется равный вес для всех классов.
-    """
+# ---------- losses ---------------------------------------------------- #
+def focal_loss(logits: torch.Tensor, target: torch.Tensor, *,
+               gamma: float = 2.0,
+               alpha: list[float] | tuple[float, ...] | None = None) -> torch.Tensor:
     if alpha is None:
         alpha = [1.0] * logits.size(1)
-    alpha_t = torch.tensor(alpha, device=logits.device)[target]  # (B,)
-    ce = cross_entropy(logits, target, reduction="none")         # (B,)
+    ce = cross_entropy(logits, target, reduction="none")
     pt = torch.exp(-ce)
-    loss = alpha_t * (1.0 - pt).pow(gamma) * ce
-    return loss.mean()
+    w = torch.tensor(alpha, device=logits.device)[target]
+    return (w * (1. - pt).pow(gamma) * ce).mean()
 
 
-# --------------------------------------------------------------------- #
-#                              TRAIN LOOP                               #
-# --------------------------------------------------------------------- #
-def train_wavecnn(
-    *,
-    train_pkl: str | pathlib.Path,
-    test_pkl: str | pathlib.Path,
-    model_out: str | pathlib.Path,
-    emb_out: str | pathlib.Path,
-    window: int = 48,
-    epochs: int = 30,
-    batch: int = 256,
-    lr: float = 1e-4,
-    log_dir: str | pathlib.Path | None = None,
-    device: str | None = None,
-):
+# ---------- helpers --------------------------------------------------- #
+def _save_embeddings(mat: np.ndarray,
+                     df_ref: pd.DataFrame,
+                     window: int,
+                     path: str | pathlib.Path):
+    """mat.shape[0] == len(df_ref) - window + 1"""
+    try:
+        idx = df_ref.index[window - 1: window - 1 + len(mat)]
+        if len(idx) != len(mat):
+            raise ValueError
+    except Exception:
+        idx = pd.RangeIndex(len(mat))
+        warnings.warn("Не удалось выровнять индексы – использую RangeIndex")
+    out = pd.DataFrame(mat, index=idx)
+    out.to_parquet(path)
+
+
+# ---------- train ----------------------------------------------------- #
+def train_wavecnn(*,
+                  train_pkl: str | pathlib.Path,
+                  test_pkl: str | pathlib.Path,
+                  model_out: str | pathlib.Path,
+                  emb_train_out: str | pathlib.Path | None = None,
+                  emb_test_out: str | pathlib.Path,
+                  window: int = 48,
+                  epochs: int = 30,
+                  batch: int = 256,
+                  lr: float = 1e-4,
+                  log_dir: str | pathlib.Path | None = None,
+                  device: str | None = None):
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[WAVECNN] device → {device}")
 
-    log_dir = log_dir or "cache/runs/wavecnn"
-    writer = SummaryWriter(log_dir)
-    print(f"[WAVECNN] TensorBoard → {log_dir}")
-
-    # ------------------------------------------------------------------ #
-    #                    ЗАГРУЗКА ДАННЫХ И ВЫЧИСЛЕНИЕ α                  #
-    # ------------------------------------------------------------------ #
+    # ---------------- data ---------------- #
     train_df = joblib.load(train_pkl)
-    test_df  = joblib.load(test_pkl)
-
+    test_df = joblib.load(test_pkl)
     train_ds = CNNWindowDataset(train_df, window_size=window)
-    test_ds  = CNNWindowDataset(test_df,  window_size=window)
+    test_ds = CNNWindowDataset(test_df, window_size=window)
 
-    # Частоты *окон* (метка = правому краю окна)
-    y_window = train_df["microtrend_label"].values.astype(np.int8)[window - 1 :]
-    freqs    = np.bincount(y_window + 1, minlength=3)  # counts for [-1,0,1]
-    raw_alpha = freqs.max() / np.clip(freqs, 1, None)
-    # Ограничим веса, чтобы не было чрезмерного доминирования
-    alpha    = np.clip(raw_alpha, 1.0, 5.0).tolist()
+    # inverse-frequency α
+    y_win = train_df["microtrend_label"].values.astype(np.int8)[window - 1:]
+    freq = np.bincount(y_win + 1, minlength=3)
+    alpha = (freq.max() / np.clip(freq, 1, None)).tolist()
     print(f"[WAVECNN] focal alpha → {alpha}")
 
-    # ------------------------------------------------------------------ #
-    #                         DATALOADERS                               #
-    # ------------------------------------------------------------------ #
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=batch,
-        shuffle=True,
-        num_workers=2,
-        pin_memory=(device.startswith("cuda")),
-    )
-    test_loader = DataLoader(
-        test_ds,
-        batch_size=batch,
-        shuffle=False,
-        num_workers=2,
-        pin_memory=(device.startswith("cuda")),
-    )
+    train_ld = DataLoader(train_ds, batch_size=batch, shuffle=True, num_workers=2,
+                          pin_memory=torch.cuda.is_available())
+    test_ld = DataLoader(test_ds, batch_size=batch, shuffle=False, num_workers=2,
+                         pin_memory=torch.cuda.is_available())
 
-    # ------------------------------------------------------------------ #
-    #                           MODEL + OPT                            #
-    # ------------------------------------------------------------------ #
-    model = WaveCNN(
-        in_channels=train_df.shape[1] - 1,  # минус столбец microtrend_label
-        window_size=window,
-    ).to(device)
+    # ---------------- model ---------------- #
+    model = WaveCNN(in_channels=train_df.shape[1] - 1, window_size=window).to(device)
     print(f"[WAVECNN] RF covers window={window}")
-
     loss_fn = functools.partial(focal_loss, gamma=2.0, alpha=alpha)
-    optim   = torch.optim.AdamW(model.parameters(), lr=lr)
+    optim = torch.optim.AdamW(model.parameters(), lr=lr)
 
-    # Более длительный warm-up: 5% от total epochs
-    warmup_epochs = max(1, int(epochs * 0.05))
-    cosine  = CosineAnnealingLR(optim, T_max=epochs - warmup_epochs, eta_min=1e-6)
+    warm = max(1, int(epochs * 0.05))
     scheduler = SequentialLR(
         optim,
-        schedulers=[
-            LinearLR(optim, start_factor=0.01, end_factor=1.0, total_iters=warmup_epochs),
-            cosine,
-        ],
-        milestones=[warmup_epochs],
+        [LinearLR(optim, 0.01, 1.0, warm), CosineAnnealingLR(optim, epochs - warm, 1e-6)],
+        [warm]
     )
 
-    acc_metric = Accuracy(task="multiclass", num_classes=3).to(device)
-    f1_metric  = F1Score(task="multiclass", num_classes=3, average="macro").to(device)
+    acc_m = Accuracy(task="multiclass", num_classes=3).to(device)
+    f1_m = F1Score(task="multiclass", num_classes=3, average="macro").to(device)
 
-    best_f1 = 0.0
-    patience = 3
-    no_improve = 0
+    writer = SummaryWriter(log_dir or "cache/runs/wavecnn")
 
-    # ------------------------------------------------------------------ #
-    #                             EPOCH LOOP                           #
-    # ------------------------------------------------------------------ #
-    for epoch in range(1, epochs + 1):
-        # -------- TRAIN -------- #
-        model.train()
-        running_loss = 0.0
-        for xb, yb in train_loader:
-            xb = xb.to(device)
-            yb = (yb + 1).to(device)  # -1/0/1 → 0/1/2
-
+    best_f1, no_imp, patience = 0., 0, 3
+    for ep in range(1, epochs + 1):
+        # ---- train
+        model.train();
+        run_loss = 0.
+        for xb, yb in train_ld:
+            xb = xb.to(device);
+            yb = (yb + 1).to(device)
             optim.zero_grad(set_to_none=True)
             logits, _ = model(xb)
-            loss = loss_fn(logits, yb)
+            loss = loss_fn(logits, yb);
             loss.backward()
-            clip_grad_norm_(model.parameters(), 1.0)
+            clip_grad_norm_(model.parameters(), 1.0);
             optim.step()
-
-            running_loss += loss.item() * xb.size(0)
-
+            run_loss += loss.item() * xb.size(0)
         scheduler.step()
 
-        # -------- VALIDATION -------- #
-        model.eval()
-        acc_metric.reset(); f1_metric.reset()
+        # ---- val
+        model.eval();
+        acc_m.reset();
+        f1_m.reset()
         with torch.no_grad():
-            for xb, yb in test_loader:
-                xb = xb.to(device)
+            for xb, yb in test_ld:
+                xb = xb.to(device);
                 yb = (yb + 1).to(device)
-                logits, _ = model(xb)
-                preds = logits.argmax(1)
-                acc_metric.update(preds, yb)
-                f1_metric.update(preds, yb)
+                preds = model(xb)[0].argmax(1)
+                acc_m.update(preds, yb);
+                f1_m.update(preds, yb)
+        tr_loss = run_loss / len(train_ds)
+        acc, f1 = acc_m.compute().item(), f1_m.compute().item()
 
-        train_loss = running_loss / len(train_ds)
-        val_acc    = acc_metric.compute().item()
-        val_f1     = f1_metric.compute().item()
+        writer.add_scalars("metrics", {"f1_val": f1, "acc_val": acc}, ep)
+        writer.add_scalar("loss/train", tr_loss, ep)
+        print(f"[ep {ep:02d}/{epochs}] loss={tr_loss:.4f}  acc={acc:.3f}  f1={f1:.3f}")
 
-        writer.add_scalar("loss/train", train_loss, epoch)
-        writer.add_scalar("acc/val",    val_acc,   epoch)
-        writer.add_scalar("f1/val",     val_f1,    epoch)
-
-        print(f"[ep {epoch:02d}/{epochs}] loss={train_loss:.4f}  acc={val_acc:.3f}  f1={val_f1:.3f}")
-
-        if val_f1 > best_f1:
-            best_f1 = val_f1
-            no_improve = 0
+        if f1 > best_f1:
+            best_f1, no_imp = f1, 0
             torch.save(model.state_dict(), model_out)
             print(f"  ↳ new best F1={best_f1:.3f}  (model saved)")
         else:
-            no_improve += 1
-            if no_improve >= patience:
-                print("  ↳ early-stopping")
+            no_imp += 1
+            if no_imp >= patience:
+                print("  ↳ early-stopping");
                 break
-
     writer.close()
     print(f"[WAVECNN] best F1 = {best_f1:.3f}")
 
-    # ------------------------------------------------------------------ #
-    #                          SAVE EMBEDDINGS                          #
-    # ------------------------------------------------------------------ #
+    # ------------- embeddings ------------- #
     model.load_state_dict(torch.load(model_out, map_location=device))
     model.eval()
-    emb_list = []
-    with torch.no_grad():
-        for xb, _ in test_loader:
-            xb = xb.to(device)
-            _, emb = model(xb)
-            emb_list.append(emb.cpu())
-    emb_mat = torch.cat(emb_list).numpy()
-    emb_df  = joblib.load(test_pkl).index[window - 1 :].to_frame().reset_index(drop=True)
-    emb_df  = torch.tensor(emb_mat)  # или pd.DataFrame(emb_mat, index=test_df.index[window-1:])
-    try:
-        pd.DataFrame(emb_mat, index=train_df.index[window - 1 :]).to_parquet(emb_out)
-    except Exception:
-        csv_path = pathlib.Path(emb_out).with_suffix(".csv")
-        pd.DataFrame(emb_mat, index=train_df.index[window - 1 :]).to_csv(csv_path)
-        warnings.warn(f"Parquet save failed, wrote CSV → {csv_path}")
-
-    print(f"[WAVECNN] embeddings → {emb_out}")
+    for name, loader, df_ref, path in [
+        ("train", train_ld, train_df, emb_train_out),
+        ("test", test_ld, test_df, emb_test_out)
+    ]:
+        if path is None: continue
+        embs = []
+        with torch.no_grad():
+            for xb, _ in loader:
+                xb = xb.to(device);
+                embs.append(model(xb)[1].cpu())
+        _save_embeddings(torch.cat(embs).numpy(), df_ref, window, path)
+        print(f"[WAVECNN] {name} embeddings → {path}")

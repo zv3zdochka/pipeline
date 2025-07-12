@@ -58,7 +58,7 @@ class WaveCNN(nn.Module):
     def __init__(
             self,
             in_channels,
-            emb_dim=128,
+            emb_dim=256,
             num_classes=3,
             window_size=24,
             kernel_size=3,
