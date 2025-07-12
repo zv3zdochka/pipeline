@@ -99,7 +99,7 @@ def main() -> None:
         model_out=str(CACHE_DIR / "wavecnn_model.pt"),
         emb_out=str(CACHE_DIR / "cnn_embeddings.parquet"),
         window=24,
-        epochs=1,
+        epochs=10,
         batch=256,
         lr=3e-4,
     )
@@ -129,7 +129,7 @@ def main() -> None:
         model_out=str(CACHE_DIR / "gru_model.pt"),
         emb_out=str(CACHE_DIR / "gru_embeddings.parquet"),
         seq_len=96,
-        epochs=1,
+        epochs=10,
         batch_size=128,
         lr=3e-4,
         patience=3,
@@ -166,37 +166,47 @@ def main() -> None:
 
     print("[TFT] DATA PREP STARTED")
     full_dataset, feature_groups = prepare_tft_dataset(
-        df_events=CACHE_DIR / "imputed_events.pkl",
-        cnn_emb_path=CACHE_DIR / "cnn_embeddings.parquet",
-        gru_emb_path=CACHE_DIR / "gru_embeddings.parquet",
-        timesnet_emb_path=CACHE_DIR / "timesnet_embeddings.parquet",
-        timesnet_pred_path=CACHE_DIR / "timesnet_forecast.parquet",
-        seq_len=96,
-        scaler_path=CACHE_DIR / "tft_scaler.pkl",
-        dataset_path=CACHE_DIR / "tft_full_dataset.pt",
-        train_size=0.8,
-        train_features_path=CACHE_DIR / "tft_train_features.npy",
-        train_targets_path=CACHE_DIR / "tft_train_targets.npy",
-        test_features_path=CACHE_DIR / "tft_test_features.npy",
-        test_targets_path=CACHE_DIR / "tft_test_targets.npy",
+        df_events=      CACHE_DIR / "imputed_events.pkl",
+        cnn_emb_path=   CACHE_DIR / "cnn_embeddings.parquet",
+        gru_emb_path=   CACHE_DIR / "gru_embeddings.parquet",
+        timesnet_emb_path= CACHE_DIR / "timesnet_embeddings.parquet",
+        timesnet_pred_path= CACHE_DIR / "timesnet_forecast.parquet",
+        seq_len=        96,
+        scaler_path=    CACHE_DIR / "tft_scaler.pkl",
+        dataset_path=   CACHE_DIR / "tft_full_dataset.pt",
+        train_size=     0.8,
+        train_features_path= CACHE_DIR / "tft_train_features.npy",
+        train_targets_path=  CACHE_DIR / "tft_train_targets.npy",
+        test_features_path=  CACHE_DIR / "tft_test_features.npy",
+        test_targets_path=   CACHE_DIR / "tft_test_targets.npy",
         strict=False,
     )
+    # Сохраняем feature‐groups для дальнейшего обучения
     joblib.dump(feature_groups, CACHE_DIR / "tft_feature_groups.pkl")
+    print("[TFT] Saving scaler and datasets...")  # совпадает с логом внутри функции
     print("[TFT] DATA PREP COMPLETED\n")
 
+ 
 
-    exit()
-
+    print("[MAIN] Training TFT model...")
     train_tft(
-        dataset_pt=CACHE_DIR / "tft_dataset.pt",
-        feature_groups_pkl=CACHE_DIR / "tft_feature_groups.pkl",
-        class_freqs_pt=CACHE_DIR / "class_freqs.pt",
-        model_out=CACHE_DIR / "tft_model.pt",
-        emb_out=CACHE_DIR / "tft_embeddings.parquet",
-        epochs=5,
-        batch_size=128,
-        lr=3e-4,
+        train_features_path=  CACHE_DIR / "tft_train_features.npy",
+        train_targets_path=   CACHE_DIR / "tft_train_targets.npy",
+        test_features_path=   CACHE_DIR / "tft_test_features.npy",
+        test_targets_path=    CACHE_DIR / "tft_test_targets.npy",
+        feature_groups_pkl=   CACHE_DIR / "tft_feature_groups.pkl",
+        class_freqs_pt=       CACHE_DIR / "class_freqs.pt",
+        seq_len=             96,
+        model_out=           CACHE_DIR / "tft_model.pt",
+        emb_out=             CACHE_DIR / "tft_embeddings.parquet",
+        epochs=              20,
+        batch_size=          128,
+        lr=                  3e-4,
+        step_size=           5,
+        gamma=              0.5,
     )
+    print("[MAIN] Training completed.")
+    exit()
 
     # ------------------------------------------------------------------ #
     # 7. PPO + Kelly Criterion
