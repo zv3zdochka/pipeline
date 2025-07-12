@@ -74,6 +74,7 @@ def main() -> None:
     with open(CACHE_DIR / "microtrend_distribution.json", 'w') as f:
         # noinspection PyTypeChecker
         json.dump(dist, f, indent=2)
+    joblib.dump(dataset, CACHE_DIR / "imputed_events.pkl")
 
     print(f"[FEATURES] Features prepared: {dataset.shape[1]} features for {dataset.shape[0]} rows")
     print(f"[MICROTREND] Assigned microtrend labels: {len(dist)} unique labels")
@@ -105,10 +106,9 @@ def main() -> None:
     train_wavecnn(
         train_pkl=str(CACHE_DIR / "wavecnn_dataset_train.pkl"),
         test_pkl=str(CACHE_DIR / "wavecnn_dataset_test.pkl"),
-        class_freqs_pt=str(CACHE_DIR / "class_freqs.pt"),
         model_out=str(CACHE_DIR / "wavecnn_model.pt"),
         emb_out=str(CACHE_DIR / "cnn_embeddings.parquet"),
-        window=24,
+        window=48,
         epochs=30,
         batch=256,
         lr=3e-4,

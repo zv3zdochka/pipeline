@@ -41,7 +41,6 @@ def train_timesnet(
         lr: float = 3e-4,
         device: str | None = None,
 ):
-    print("[TIMESNET] TRAINING STARTED")
     train_raw = torch.load(train_pt, weights_only=False)
     X_train, y_train = train_raw["X"], train_raw["y"]
     print(f"[TIMESNET] Loaded train set: {len(X_train)} samples")

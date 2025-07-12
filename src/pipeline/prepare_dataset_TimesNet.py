@@ -44,7 +44,6 @@ def prepare_timesnet_dataset(
         strict: bool = False,
 ):
 
-    print("[TIMESNET] DATA PREP STARTED")
 
     default_cols = [
         "ohlcv_5m_open", "ohlcv_5m_high", "ohlcv_5m_low",
