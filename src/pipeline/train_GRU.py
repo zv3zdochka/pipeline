@@ -129,7 +129,6 @@ def train_gru(
     # extract hidden embeddings using the best model
     model.load_state_dict(torch.load(model_out))
     model.eval()
-    print("[GRU] Extracting hidden embeddings...")
     embs = []
     with torch.no_grad():
         for X, _ in DataLoader(ds_train, batch_size=batch_size, shuffle=False,

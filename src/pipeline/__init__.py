@@ -1,6 +1,8 @@
 from .analyze_dataset import print_dataset_overview
 from .preprocess_dataset import impute_missing
 from .extract_features import prepare_features, label_microtrend, save_dataset_and_distribution
+from .data_expand import expand_dataset
+
 
 from .prepare_dataset_CNN import prepare_1dcnn_df, CNNWindowDataset
 from .train_WaveNetCNN import train_wavecnn
@@ -20,6 +22,7 @@ __all__ = [
     "print_dataset_overview",
     "impute_missing",
     "prepare_features",
+    "expand_dataset",
     "label_microtrend",
     "prepare_1dcnn_df",
     "CNNWindowDataset",

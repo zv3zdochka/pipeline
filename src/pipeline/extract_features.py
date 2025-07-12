@@ -135,19 +135,47 @@ def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
     return df_merged.reset_index()
 
 
+import pandas as pd
+
+
 def label_microtrend(
         df: pd.DataFrame,
         price_col: str = 'ohlcv_5m_close',
-        window: int = 3,
-        threshold: float = 0.03
+        min_candles: int = 3,
+        profit_thr: float = 0.03,
+        stop_loss_thr: float = 0.02
 ) -> pd.Series:
-    close = df[price_col]
-    cum_ret = close.shift(-window + 1).rolling(window).apply(
-        lambda x: x[-1] / x[0] - 1, raw=True
-    )
-    labels = pd.Series(0, index=close.index, dtype='int8')
-    labels[cum_ret >= threshold] = 1
-    labels[cum_ret <= -threshold] = -1
+    close = df[price_col].values
+    n = len(close)
+    labels = pd.Series(0, index=df.index, dtype='int8')
+
+    for i in range(n):
+        entry_price = close[i]
+        if entry_price == 0:
+            continue
+        min_ret = 0.0
+        max_ret = 0.0
+
+        for j in range(i + 1, n):
+            ret = close[j] / entry_price - 1
+            min_ret = min(min_ret, ret)
+            max_ret = max(max_ret, ret)
+            length = j - i + 1
+
+            if length < min_candles:
+                continue
+
+            if ret >= profit_thr and min_ret >= -stop_loss_thr:
+                labels.iat[i] = 1
+                break
+
+            if ret <= -profit_thr and max_ret <= stop_loss_thr:
+                labels.iat[i] = -1
+                break
+
+            if min_ret < -stop_loss_thr or max_ret > stop_loss_thr:
+                break
+
     return labels
 
 
@@ -158,7 +186,7 @@ def save_dataset_and_distribution(dataset: pd.DataFrame):
     Args:
         dataset: DataFrame with 'microtrend_label'.
     """
-    dataset.to_csv(CACHE_DIR / "dataset.csv", index=False)
+    dataset.to_csv(CACHE_DIR / "dataset_small.csv", index=False)
     joblib.dump(dataset, CACHE_DIR / "imputed_events.pkl")
 
     dist = dataset['microtrend_label'].value_counts().to_dict()

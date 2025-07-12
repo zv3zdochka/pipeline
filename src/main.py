@@ -2,6 +2,7 @@
 import pathlib
 import pandas as pd
 import joblib
+import os
 
 from pipeline import (
     impute_missing,
@@ -17,13 +18,17 @@ from pipeline import (
     train_tft,
     print_dataset_overview,
     save_dataset_and_distribution,
-    train_ppo
+    train_ppo,
+    expand_dataset
 )
+
+os.chdir(os.path.dirname(__file__))
+CACHE_DIR = pathlib.Path("cache")
 
 CACHE_DIR = pathlib.Path(__file__).parent / "cache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-CSV_PATH = pathlib.Path(__file__).parent.parent / "data" / "XRPUSDT_merge_180d.csv"
+CSV_PATH = pathlib.Path(__file__).parent.parent / "data" / "XRPUSDT_merge_30d.csv"
 
 
 def main() -> None:
@@ -44,11 +49,25 @@ def main() -> None:
     dataset = prepare_features(df)
     print(f"[FEATURES] Features prepared: {dataset.shape[1]} features for {dataset.shape[0]} rows")
 
-    dataset['microtrend_label'] = label_microtrend(dataset, window=36, threshold=0.03)
+    dataset['microtrend_label'] = label_microtrend(
+        dataset,
+        price_col='ohlcv_5m_close',
+        min_candles=3,
+        profit_thr=0.02,
+        stop_loss_thr=0.015
+    )
+
     print(f"[MICROTREND] Assigned microtrend labels: {dataset['microtrend_label'].nunique()} unique labels")
 
     # Save outputs
     save_dataset_and_distribution(dataset)
+
+    dataset = expand_dataset(dataset, n=6, noise_sigma=0.003)
+
+    dataset.to_csv(f"{CACHE_DIR / 'dataset.csv'}", index=False)
+
+    dist_aug = dataset['microtrend_label'].value_counts().sort_index()
+    print(f"[EXPANDED DISTRIBUTION] {dist_aug.to_dict()}")
 
     # Wavelet + 1D-CNN
     print(f"[WAVECNN] Starting CNN dataset preparation")
@@ -116,46 +135,31 @@ def main() -> None:
         patience=3,
     )
     print("[GRU] Done")
-    exit()
-
-    train_gru(
-        dataset_pkl=str(CACHE_DIR / "gru_dataset.pkl"),
-        class_freqs_pt=str(CACHE_DIR / "class_freqs.pt"),
-        events_pkl=str(CACHE_DIR / "imputed_events.pkl"),
-        emb_path=str(CACHE_DIR / "cnn_embeddings.parquet"),
-        model_out=str(CACHE_DIR / "gru_model.pt"),
-        emb_out=str(CACHE_DIR / "gru_embeddings.parquet"),
-        seq_len=96,
-        epochs=1,
-        batch_size=128,
-        lr=3e-4,
-    )
-
-    print("[MAIN] All steps completed successfully.")
-
-    exit()
-
-    # ------------------------------------------------------------------ #
-    # 5. TimesNet: подготовка и обучение
-    # ------------------------------------------------------------------ #
-    _, _ = prepare_timesnet_dataset(
-        dataset,
+    prepare_timesnet_dataset(
+        df=dataset,
         seq_len=288,
         horizon=288,
+        train_dataset_path=CACHE_DIR / "timesnet_train.pt",
+        test_dataset_path=CACHE_DIR / "timesnet_test.pt",
         scaler_path=CACHE_DIR / "timesnet_scaler.pkl",
-        dataset_path=CACHE_DIR / "timesnet_dataset.pt",
     )
+
+    # ---- 2. обучение ----
     train_timesnet(
-        dataset_pt=str(CACHE_DIR / "timesnet_dataset.pt"),
+        train_pt=str(CACHE_DIR / "timesnet_train.pt"),
+        test_pt=str(CACHE_DIR / "timesnet_test.pt"),
         events_pkl=str(CACHE_DIR / "imputed_events.pkl"),
         model_out=str(CACHE_DIR / "timesnet_model.pt"),
         embed_out=str(CACHE_DIR / "timesnet_embeddings.parquet"),
         forecast_out=str(CACHE_DIR / "timesnet_forecast.parquet"),
         seq_len=288,
-        epochs=1,
-        batch_size=128,
+        epochs=5,
+        batch_size=256,
         lr=3e-4,
     )
+
+    print("[MAIN] All steps completed successfully.")
+    exit()
 
     # ------------------------------------------------------------------ #
     # 6. Собираем TFT-датасет и обучаем TFT

@@ -1,22 +1,27 @@
-# src/pipeline/prepare_dataset_TimesNet.py
+from __future__ import annotations
+
 import pathlib
 import warnings
+import joblib
 import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
 from sklearn.preprocessing import StandardScaler
-import joblib
+
+EPS = 0.001
 
 
 class TimesNetDataset(Dataset):
-    """Torch-Dataset -> (seq_len, D), scalar-target."""
     def __init__(self, X: np.ndarray, y: np.ndarray):
         self.X = torch.from_numpy(X).float()
-        self.y = torch.from_numpy(y).float()
+        self.y = torch.from_numpy(y).long()
 
-    def __len__(self):           return len(self.y)
-    def __getitem__(self, idx):  return self.X[idx], self.y[idx]
+    def __len__(self):
+        return len(self.y)
+
+    def __getitem__(self, idx):
+        return self.X[idx], self.y[idx]
 
 
 def prepare_timesnet_dataset(
@@ -26,68 +31,95 @@ def prepare_timesnet_dataset(
         horizon: int = 288,
         feature_cols: list | None = None,
         scaler_path: str | pathlib.Path = "timesnet_scaler.pkl",
-        dataset_path: str | pathlib.Path = "timesnet_dataset.pt",
-        strict: bool = False         # если True — падаем, когда колонки отсутствуют
+        train_dataset_path: str | pathlib.Path | None = None,
+        test_dataset_path: str | pathlib.Path | None = None,
+        train_ratio: float = 0.8,
+        strict: bool = False,
 ):
-    """
-    • Берёт числовые фичи ➜ нормализует ➜ делает скользящие окна для TimesNet
-    • Цель: %-изменение close через `horizon`
-    • Автоматически сохраняет scaler и torch-tensor датасет
-    """
+    print("[TIMESNET] DATA PREP STARTED")
 
     default_cols = [
-        # --- рыночные OHLCV -----------
-        "ohlcv_5m_open", "ohlcv_5m_high", "ohlcv_5m_low", "ohlcv_5m_close", "ohlcv_5m_vol",
-        # --- открытый интерес ----------
+        "ohlcv_5m_open", "ohlcv_5m_high", "ohlcv_5m_low",
+        "ohlcv_5m_close", "ohlcv_5m_vol",
         "open_interest_kline_open", "open_interest_kline_close",
-        "open_interest_kline_low",  "open_interest_kline_high",
-        # --- funding-rate --------------
+        "open_interest_kline_low", "open_interest_kline_high",
         "funding_rate_kline_open", "funding_rate_kline_close",
-        "funding_rate_kline_low",  "funding_rate_kline_high",
-        # --- LS-ratio ------------------
-        "longshort_global_ratio", "longshort_top_account_ratio", "longshort_top_position_ratio",
-        # --- OPTIONAL ---
+        "funding_rate_kline_low", "funding_rate_kline_high",
+        "longshort_global_ratio", "longshort_top_account_ratio",
+        "longshort_top_position_ratio",
         "fund_flow_history_m5net",
         "funding_rate_weighted_openFundingRate",
         "funding_rate_weighted_turnoverFundingRate",
     ]
-
     feature_cols = feature_cols or default_cols
-    df_proc = df.copy()
 
-    # ---- таргет: % изменения close через horizon ----
-    df_proc["timesnet_target"] = df_proc["ohlcv_5m_close"].shift(-horizon) / df_proc["ohlcv_5m_close"] - 1.0
+    df_proc = df.sort_values("ts").reset_index(drop=True)
 
-    # ---- проверяем доступность колонок ----
+    df_proc["pct_future"] = (
+            df_proc["ohlcv_5m_close"].shift(-horizon) /
+            df_proc["ohlcv_5m_close"] - 1.0
+    )
+
+    df_proc["timesnet_target"] = np.select(
+        [df_proc["pct_future"] > EPS, df_proc["pct_future"] < -EPS],
+        [1, -1],
+        default=0
+    ).astype(np.int8)
+    print("[TIMESNET] Assigned target classes")
+
     missing = [c for c in feature_cols if c not in df_proc.columns]
     if missing:
-        msg = f"[TimesNet] отсутствуют колонки: {missing}"
+        msg = f"[TIMESNET] Missing columns: {missing}"
         if strict:
             raise KeyError(msg)
-        warnings.warn(msg + " — будут пропущены")
+        warnings.warn(msg)
         feature_cols = [c for c in feature_cols if c in df_proc.columns]
 
-    # ---- отбрасываем строки с NaN в выбранных фичах/таргете ----
+    df_proc[feature_cols] = df_proc[feature_cols].ffill().bfill()
     df_proc = df_proc.dropna(subset=feature_cols + ["timesnet_target"])
 
-    # ---- извлекаем X, y ----
-    X_all = df_proc[feature_cols].astype("float32").values
-    y_all = df_proc["timesnet_target"].astype("float32").values
+    split_idx = int(len(df_proc) * train_ratio)
+    train_df, test_df = df_proc.iloc[:split_idx], df_proc.iloc[split_idx:]
+    print(f"[TIMESNET] Split into train ({len(train_df)}) / test ({len(test_df)})")
 
-    # ---- масштабируем ----
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X_all)
+    scaler = StandardScaler().fit(train_df[feature_cols])
+    print(f"[TIMESNET] Fitted scaler, saving to {scaler_path}")
+    joblib.dump({"scaler": scaler, "features": feature_cols}, scaler_path)
 
-    # ---- окна длиной seq_len ----
-    seqs, tgts = [], []
-    for i in range(seq_len, len(X_scaled)):
-        seqs.append(X_scaled[i - seq_len : i])
-        tgts.append(y_all[i])
-    X_arr = np.stack(seqs, axis=0)          # [N, seq_len, D]
-    y_arr = np.array(tgts, dtype=np.float32)
+    def to_numpy(dfr: pd.DataFrame):
+        X = scaler.transform(dfr[feature_cols].astype("float32"))
+        y = dfr["timesnet_target"].values
+        return X, y
 
-    # ---- сохраняем ----
-    joblib.dump(scaler, scaler_path)
-    torch.save({"X": X_arr, "y": y_arr}, dataset_path)
+    X_train, y_train = to_numpy(train_df)
+    X_test, y_test = to_numpy(test_df)
 
-    return TimesNetDataset(X_arr, y_arr), scaler
+    def make_windows(X: np.ndarray, y: np.ndarray):
+        seqs, tgts = [], []
+        for i in range(seq_len, len(X)):
+            seqs.append(X[i - seq_len:i])
+            tgts.append(y[i])
+        return np.stack(seqs), np.array(tgts, dtype=np.int64)
+
+    Xtr, ytr = make_windows(X_train, y_train)
+    Xte, yte = make_windows(X_test, y_test)
+    print(f"[TIMESNET] Created windows: train {len(Xtr)} / test {len(Xte)}")
+
+    if train_dataset_path and test_dataset_path:
+        torch.save({"X": Xtr, "y": ytr}, train_dataset_path)
+        torch.save({"X": Xte, "y": yte}, test_dataset_path)
+        print(f"[TIMESNET] Saved train dataset to {train_dataset_path}")
+        print(f"[TIMESNET] Saved test dataset to {test_dataset_path}")
+    else:
+        torch.save(
+            {"X": np.concatenate([Xtr, Xte]), "y": np.concatenate([ytr, yte])},
+            "timesnet_dataset.pt"
+        )
+        print("[TIMESNET] Saved combined dataset to timesnet_dataset.pt")
+
+    print("[TIMESNET] DATA PREP COMPLETED")
+    return (
+        TimesNetDataset(Xtr, ytr),
+        TimesNetDataset(Xte, yte),
+        scaler,
+    )

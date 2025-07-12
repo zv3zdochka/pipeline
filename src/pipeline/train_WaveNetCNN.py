@@ -114,7 +114,7 @@ def train_wavecnn(
         scheduler.step()
 
         model.eval()
-        acc_metric.reset();
+        acc_metric.reset()
         f1_metric.reset()
         with torch.no_grad():
             for x, y in test_loader:
