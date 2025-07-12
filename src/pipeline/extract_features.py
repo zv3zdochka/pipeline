@@ -164,15 +164,12 @@ def label_microtrend(
 
             if length < min_candles:
                 continue
-
             if ret >= profit_thr and min_ret >= -stop_loss_thr:
                 labels.iat[i] = 1
                 break
-
             if ret <= -profit_thr and max_ret <= stop_loss_thr:
                 labels.iat[i] = -1
                 break
-
             if min_ret < -stop_loss_thr or max_ret > stop_loss_thr:
                 break
 
