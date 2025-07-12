@@ -3,6 +3,7 @@ import pathlib
 import pandas as pd
 import joblib
 import os
+import json
 
 from pipeline import (
     impute_missing,
@@ -17,7 +18,6 @@ from pipeline import (
     prepare_tft_dataset,
     train_tft,
     print_dataset_overview,
-    save_dataset_and_distribution,
     train_ppo,
     expand_dataset
 )
@@ -59,22 +59,33 @@ def main() -> None:
 
     print(f"[MICROTREND] Assigned microtrend labels: {dataset['microtrend_label'].nunique()} unique labels")
 
-    # Save outputs
-    save_dataset_and_distribution(dataset)
+    dataset.to_csv(CACHE_DIR / "dataset_small.csv", index=False)
+    joblib.dump(dataset, CACHE_DIR / "imputed_events_small.pkl")
+
+    dist = dataset['microtrend_label'].value_counts().to_dict()
+
+    print(f"[DISTRIBUTION] {dist}")
 
     dataset = expand_dataset(dataset, n=6, noise_sigma=0.003)
-
     dataset.to_csv(f"{CACHE_DIR / 'dataset.csv'}", index=False)
 
     dist_aug = dataset['microtrend_label'].value_counts().sort_index()
     print(f"[EXPANDED DISTRIBUTION] {dist_aug.to_dict()}")
+    with open(CACHE_DIR / "microtrend_distribution.json", 'w') as f:
+        # noinspection PyTypeChecker
+        json.dump(dist, f, indent=2)
+
+    print(f"[FEATURES] Features prepared: {dataset.shape[1]} features for {dataset.shape[0]} rows")
+    print(f"[MICROTREND] Assigned microtrend labels: {len(dist)} unique labels")
+    print(f"[MAIN] Saved dataset.csv, imputed_events.pkl, and microtrend_distribution.json in {CACHE_DIR}")
+
     # Wavelet + 1D-CNN
     print(f"[WAVECNN] Starting CNN dataset preparation")
     df_train_cnn, df_test_cnn, scaler_raw, scaler_wave = prepare_1dcnn_df(
         dataset,
         wavelet="db4",
         level=3,
-        window_size=24,
+        window_size=48,
         train_frac=0.8,
         raw_scaler_path=CACHE_DIR / "scaler_raw.pkl",
         wave_scaler_path=CACHE_DIR / "scaler_wave.pkl",
@@ -98,7 +109,7 @@ def main() -> None:
         model_out=str(CACHE_DIR / "wavecnn_model.pt"),
         emb_out=str(CACHE_DIR / "cnn_embeddings.parquet"),
         window=24,
-        epochs=10,
+        epochs=30,
         batch=256,
         lr=3e-4,
     )

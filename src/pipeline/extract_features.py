@@ -174,24 +174,3 @@ def label_microtrend(
                 break
 
     return labels
-
-
-def save_dataset_and_distribution(dataset: pd.DataFrame):
-    """
-    Save the feature dataset and label distribution to CACHE_DIR.
-
-    Args:
-        dataset: DataFrame with 'microtrend_label'.
-    """
-    dataset.to_csv(CACHE_DIR / "dataset_small.csv", index=False)
-    joblib.dump(dataset, CACHE_DIR / "imputed_events.pkl")
-
-    dist = dataset['microtrend_label'].value_counts().to_dict()
-    with open(CACHE_DIR / "microtrend_distribution.json", 'w') as f:
-        # noinspection PyTypeChecker
-        json.dump(dist, f, indent=2)
-
-    print(f"[FEATURES] Features prepared: {dataset.shape[1]} features for {dataset.shape[0]} rows")
-    print(f"[MICROTREND] Assigned microtrend labels: {len(dist)} unique labels")
-    print(f"[DISTRIBUTION] {dist}")
-    print(f"[MAIN] Saved dataset.csv, imputed_events.pkl, and microtrend_distribution.json in {CACHE_DIR}")

@@ -13,15 +13,22 @@ EPS = 0.001
 
 
 class TimesNetDataset(Dataset):
-    def __init__(self, X: np.ndarray, y: np.ndarray):
-        self.X = torch.from_numpy(X).float()
-        self.y = torch.from_numpy(y).long()
+    def __init__(self, X: np.ndarray, y: np.ndarray, seq_len: int):
+        # хранит только 2D-массивы и лениво отдает окна
+        self.X = X.astype("float32")
+        self.y = y
+        self.seq_len = seq_len
 
     def __len__(self):
-        return len(self.y)
+        # число возможных окон
+        return len(self.y) - self.seq_len
 
     def __getitem__(self, idx):
-        return self.X[idx], self.y[idx]
+        # окно [idx : idx+seq_len], метка в позиции idx+seq_len
+        i = idx + self.seq_len
+        seq = torch.from_numpy(self.X[idx:i]).float()
+        label = torch.tensor(int(self.y[i])).long()
+        return seq, label
 
 
 def prepare_timesnet_dataset(
@@ -36,6 +43,7 @@ def prepare_timesnet_dataset(
         train_ratio: float = 0.8,
         strict: bool = False,
 ):
+
     print("[TIMESNET] DATA PREP STARTED")
 
     default_cols = [
@@ -56,10 +64,9 @@ def prepare_timesnet_dataset(
     df_proc = df.sort_values("ts").reset_index(drop=True)
 
     df_proc["pct_future"] = (
-            df_proc["ohlcv_5m_close"].shift(-horizon) /
-            df_proc["ohlcv_5m_close"] - 1.0
+        df_proc["ohlcv_5m_close"].shift(-horizon) /
+        df_proc["ohlcv_5m_close"] - 1.0
     )
-
     df_proc["timesnet_target"] = np.select(
         [df_proc["pct_future"] > EPS, df_proc["pct_future"] < -EPS],
         [1, -1],
@@ -94,32 +101,28 @@ def prepare_timesnet_dataset(
     X_train, y_train = to_numpy(train_df)
     X_test, y_test = to_numpy(test_df)
 
-    def make_windows(X: np.ndarray, y: np.ndarray):
-        seqs, tgts = [], []
-        for i in range(seq_len, len(X)):
-            seqs.append(X[i - seq_len:i])
-            tgts.append(y[i])
-        return np.stack(seqs), np.array(tgts, dtype=np.int64)
+    # посчитаем число окон, чтобы вывести аналогичный лог
+    n_tr = len(y_train) - seq_len
+    n_te = len(y_test) - seq_len
+    print(f"[TIMESNET] Created windows: train {n_tr} / test {n_te}")
 
-    Xtr, ytr = make_windows(X_train, y_train)
-    Xte, yte = make_windows(X_test, y_test)
-    print(f"[TIMESNET] Created windows: train {len(Xtr)} / test {len(Xte)}")
+    # создаем ленивые датасеты
+    train_ds = TimesNetDataset(X_train, y_train, seq_len)
+    test_ds  = TimesNetDataset(X_test,  y_test,  seq_len)
 
+    # по желанию можно сохранять сами np-массивы для оффлайн-загрузки
     if train_dataset_path and test_dataset_path:
-        torch.save({"X": Xtr, "y": ytr}, train_dataset_path)
-        torch.save({"X": Xte, "y": yte}, test_dataset_path)
+        torch.save({"X": X_train, "y": y_train}, train_dataset_path)
+        torch.save({"X": X_test,  "y": y_test},  test_dataset_path)
         print(f"[TIMESNET] Saved train dataset to {train_dataset_path}")
         print(f"[TIMESNET] Saved test dataset to {test_dataset_path}")
     else:
         torch.save(
-            {"X": np.concatenate([Xtr, Xte]), "y": np.concatenate([ytr, yte])},
+            {"X": np.concatenate([X_train, X_test]),
+             "y": np.concatenate([y_train, y_test])},
             "timesnet_dataset.pt"
         )
         print("[TIMESNET] Saved combined dataset to timesnet_dataset.pt")
 
     print("[TIMESNET] DATA PREP COMPLETED")
-    return (
-        TimesNetDataset(Xtr, ytr),
-        TimesNetDataset(Xte, yte),
-        scaler,
-    )
+    return train_ds, test_ds, scaler

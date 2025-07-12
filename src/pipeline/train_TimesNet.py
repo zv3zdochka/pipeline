@@ -14,8 +14,11 @@ from .models.TimesNet import TimesNetModel
 
 def _loader(ds, batch, shuffle, sampler=None):
     return DataLoader(
-        ds, batch_size=batch, shuffle=shuffle if sampler is None else False,
-        sampler=sampler, num_workers=0, pin_memory=True
+        ds, batch_size=batch,
+        shuffle=(shuffle if sampler is None else False),
+        sampler=sampler,
+        num_workers=0,
+        pin_memory=True
     )
 
 
@@ -43,6 +46,7 @@ def train_timesnet(
     X_train, y_train = train_raw["X"], train_raw["y"]
     print(f"[TIMESNET] Loaded train set: {len(X_train)} samples")
 
+    # Load or split test/validation set
     if test_pt and pathlib.Path(test_pt).exists():
         test_raw = torch.load(test_pt, weights_only=False)
         X_val, y_val = test_raw["X"], test_raw["y"]
@@ -52,21 +56,28 @@ def train_timesnet(
         X_train, X_val = X_train[:split], X_train[split:]
         y_train, y_val = y_train[:split], y_train[split:]
 
-    train_ds = TimesNetDataset(X_train, y_train)
-    val_ds = TimesNetDataset(X_val, y_val)
+    # Instantiate datasets with seq_len
+    train_ds = TimesNetDataset(X_train, y_train, seq_len)
+    val_ds   = TimesNetDataset(X_val,   y_val,   seq_len)
 
+    # Compute class weights on raw labels
     w = _class_weights(y_train)
-    sample_weights = torch.tensor([w[y + 1] for y in y_train])
+
+    # Build sample weights aligned to windows: for each window idx, label is y_train[idx+seq_len]
+    window_labels = y_train[seq_len:]
+    sample_weights = torch.tensor([w[int(lbl) + 1] for lbl in window_labels])
     sampler = torch.utils.data.WeightedRandomSampler(
         sample_weights, num_samples=len(sample_weights), replacement=True
     )
 
+    # DataLoaders
     train_loader = _loader(train_ds, batch_size, shuffle=False, sampler=sampler)
-    val_loader = _loader(val_ds, batch_size, shuffle=False)
+    val_loader   = _loader(val_ds,   batch_size, shuffle=False)
 
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[TIMESNET] Using device: {device}")
 
+    # Model, loss, optimizer, scheduler, scaler
     model = TimesNetModel(
         seq_len=seq_len,
         n_features=X_train.shape[-1],
@@ -75,17 +86,18 @@ def train_timesnet(
         num_classes=3,
     ).to(device)
 
-    weights = torch.tensor(w, device=device)
+    weights   = torch.tensor(w, device=device)
     criterion = nn.CrossEntropyLoss(weight=weights, label_smoothing=0.05)
-    optim = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-2)
+    optim     = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-2)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optim, mode="min", patience=3, factor=0.5, verbose=True
     )
-    scaler = torch.amp.GradScaler(enabled=device.startswith("cuda"))
+    scaler    = torch.amp.GradScaler(enabled=device.startswith("cuda"))
 
     best_val = float("inf")
     patience = 6
 
+    # Training loop
     for ep in range(1, epochs + 1):
         print(f"[TIMESNET] Epoch {ep}/{epochs} starting")
         model.train()
@@ -116,7 +128,7 @@ def train_timesnet(
                 y_pred.extend(logits.argmax(1).cpu().tolist())
 
         train_loss /= len(train_ds)
-        val_loss /= len(val_ds)
+        val_loss   /= len(val_ds)
         f1 = f1_score(y_true, y_pred, average="macro", zero_division=0)
 
         print(f"[TIMESNET] ep {ep:02d}/{epochs}  train={train_loss:.4f}  val={val_loss:.4f}  f1={f1:.3f}")
@@ -136,6 +148,7 @@ def train_timesnet(
 
     print(f"[TIMESNET] Training completed, best val={best_val:.4f}")
 
+    # Load best model, generate embeddings & forecasts
     model.load_state_dict(torch.load(model_out, map_location=device))
     model.eval()
     print("[TIMESNET] Generating embeddings and forecasts")
@@ -143,6 +156,7 @@ def train_timesnet(
     full_ds = TimesNetDataset(
         np.concatenate([X_train, X_val], axis=0),
         np.concatenate([y_train, y_val], axis=0),
+        seq_len,
     )
     full_loader = _loader(full_ds, batch_size, shuffle=False)
 
@@ -155,10 +169,10 @@ def train_timesnet(
             logits_list.append(logits.cpu())
 
     embeds = torch.cat(embeds_list).numpy()
-    probs = torch.softmax(torch.cat(logits_list), dim=1).numpy()[:, 2]
+    probs  = torch.softmax(torch.cat(logits_list), dim=1).numpy()[:, 2]
 
     if events_pkl and pathlib.Path(events_pkl).exists():
-        ev = joblib.load(events_pkl).set_index("ts").sort_index()
+        ev     = joblib.load(events_pkl).set_index("ts").sort_index()
         ts_idx = ev.index[seq_len: seq_len + len(probs)]
     else:
         ts_idx = pd.RangeIndex(len(probs))

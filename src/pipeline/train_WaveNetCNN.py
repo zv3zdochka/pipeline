@@ -8,7 +8,7 @@ import joblib
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from torch.optim.lr_scheduler import CosineAnnealingLR, SequentialLR, LinearLR
 from torch.nn.utils import clip_grad_norm_
 from sklearn.utils.class_weight import compute_class_weight
@@ -17,13 +17,16 @@ from torch.utils.tensorboard import SummaryWriter
 
 from .prepare_dataset_CNN import CNNWindowDataset
 from .models.WaveNetCNN import WaveCNN
+from torch.nn.functional import cross_entropy
 
-
-def make_loader(df, window, batch, shuffle):
-    ds = CNNWindowDataset(df, window_size=window)
-    return DataLoader(ds, batch_size=batch, shuffle=shuffle,
-                      pin_memory=torch.cuda.is_available(), num_workers=2)
-
+def focal_loss(logits: torch.Tensor,
+               target: torch.Tensor,
+               gamma: float = 2.0,
+               alpha: list[float] = [0.25, 0.5, 0.25]) -> torch.Tensor:
+    ce = cross_entropy(logits, target, reduction="none")
+    pt = torch.exp(-ce)
+    w = torch.tensor(alpha, device=logits.device)[target]
+    return (w * ((1 - pt) ** gamma) * ce).mean()
 
 def get_class_weights(y_labels: np.ndarray) -> torch.Tensor:
     classes = np.array([-1, 0, 1])
@@ -33,7 +36,6 @@ def get_class_weights(y_labels: np.ndarray) -> torch.Tensor:
         y=y_labels
     )
     return torch.tensor(weights, dtype=torch.float32)
-
 
 def train_wavecnn(
         train_pkl: str | pathlib.Path,
@@ -61,8 +63,41 @@ def train_wavecnn(
     print(f"[WAVECNN] Loading test  dataset from {test_pkl}")
     test_df = joblib.load(test_pkl)
 
-    train_loader = make_loader(train_df, window, batch, shuffle=True)
-    test_loader = make_loader(test_df, window, batch, shuffle=False)
+    # --- создаём тренировочный датасет и самплер правильно ---
+    # 1) Датасет окон
+    train_ds = CNNWindowDataset(train_df, window_size=window)
+    # 2) Класс-лейблы для всех сэмплов окон — это train_df["microtrend_label"][window-1:]
+    y_full = train_df["microtrend_label"].to_numpy()
+    y_idx = (y_full + 1).astype(int)  # -1/0/1 -> 0/1/2
+    # 3) Веса классов
+    class_weights = get_class_weights(y_full).to(device)
+    print(f"[WAVECNN] Class weights: {class_weights.tolist()}")
+    # 4) Веса каждого окна
+    sample_weights = class_weights[y_idx][window - 1:]
+    sampler = WeightedRandomSampler(
+        weights=sample_weights,
+        num_samples=len(sample_weights),
+        replacement=True
+    )
+    # 5) DataLoader
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=batch,
+        sampler=sampler,
+        pin_memory=torch.cuda.is_available(),
+        num_workers=2
+    )
+    # -----------------------------------------------------------
+
+    # тестовый загрузчик без семплинга
+    test_ds = CNNWindowDataset(test_df, window_size=window)
+    test_loader = DataLoader(
+        test_ds,
+        batch_size=batch,
+        shuffle=False,
+        pin_memory=torch.cuda.is_available(),
+        num_workers=2
+    )
 
     model = WaveCNN(
         in_channels=train_df.shape[1] - 1,
@@ -70,11 +105,7 @@ def train_wavecnn(
     ).to(device)
     print(f"[WAVECNN] Model initialized with window_size={window}")
 
-    y_train = train_df["microtrend_label"].to_numpy()
-    weights = get_class_weights(y_train).to(device)
-    print(f"[WAVECNN] Class weights: {weights.tolist()}")
-
-    loss_fn = torch.nn.CrossEntropyLoss(weight=weights)
+    loss_fn = focal_loss
     optim = torch.optim.AdamW(model.parameters(), lr=lr)
 
     cosine = CosineAnnealingLR(optim, T_max=epochs - warmup_epochs, eta_min=1e-6)
@@ -100,7 +131,7 @@ def train_wavecnn(
 
         for x, y in train_loader:
             x = x.to(device)
-            y = (y + 1).to(device)  # -1/0/1 -> 0/1/2
+            y = (y + 1).to(device)
 
             optim.zero_grad()
             logits, _ = model(x)
@@ -127,7 +158,7 @@ def train_wavecnn(
 
         val_acc = acc_metric.compute().item()
         val_f1 = f1_metric.compute().item()
-        avg_loss = train_loss / len(train_df)
+        avg_loss = train_loss / len(train_ds)
 
         writer.add_scalar("train/loss", avg_loss, epoch)
         writer.add_scalar("val/accuracy", val_acc, epoch)

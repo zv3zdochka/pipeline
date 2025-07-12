@@ -37,7 +37,7 @@ class WaveletBlock(nn.Module):
             CausalConv1d(channels, channels, kernel_size, dilation)
         )
         self.res_conv = nn.Conv1d(channels, channels, 1)
-        self.dropout = nn.Dropout(0.2)
+        self.dropout = nn.Dropout(0.05)
 
     def forward(self, x):
         f = torch.tanh(self.conv_filter(x))
@@ -83,7 +83,7 @@ class WaveCNN(nn.Module):
             nn.Linear(channels, emb_dim),
             nn.BatchNorm1d(emb_dim),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.3),
+            nn.Dropout(0.05),
             nn.Linear(emb_dim, num_classes)
         )
 
