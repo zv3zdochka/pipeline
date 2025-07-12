@@ -1,4 +1,6 @@
 # src/pipeline/train_WaveNetCNN.py
+from __future__ import annotations
+
 import pathlib
 import warnings
 
@@ -50,7 +52,7 @@ def train_wavecnn(
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[WAVECNN] Using device: {device}")
 
-    log_dir = log_dir or "runs/wavecnn"
+    log_dir = log_dir or "cache/runs/wavecnn"
     writer = SummaryWriter(log_dir)
     print(f"[WAVECNN] TensorBoard logs -> {log_dir}")
 
