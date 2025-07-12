@@ -110,7 +110,7 @@ def main() -> None:
         emb_test_out=None,
         window=48,
         epochs=30,
-        batch=256,
+        batch=2048,
         lr=1e-4,
     )
 
@@ -129,18 +129,18 @@ def main() -> None:
 
     print("[GRU] Training GRU model")
     train_gru(
-        train_pkl=str(CACHE_DIR / "gru_dataset_train.pkl"),
-        test_pkl=str(CACHE_DIR / "gru_dataset_test.pkl"),
-        class_freqs_pt=str(CACHE_DIR / "class_freqs.pt"),
-        events_pkl=str(CACHE_DIR / "imputed_events.pkl"),
-        emb_path=str(CACHE_DIR / "cnn_embeddings.parquet"),
-        model_out=str(CACHE_DIR / "gru_model.pt"),
-        emb_out=str(CACHE_DIR / "gru_embeddings.parquet"),
+        train_pkl=CACHE_DIR / "gru_dataset_train.pkl",
+        test_pkl=CACHE_DIR / "gru_dataset_test.pkl",
+        class_freqs_pt=CACHE_DIR / "class_freqs.pt",       # не используется внутри
+        events_pkl=CACHE_DIR / "imputed_events.pkl",       # не используется внутри
+        emb_path=CACHE_DIR / "cnn_embeddings.parquet",     # не используется внутри
+        model_out=CACHE_DIR / "gru_model.pt",
+        emb_out=CACHE_DIR / "gru_embeddings.parquet",
         seq_len=96,
         epochs=10,
-        batch_size=128,
-        lr=3e-4,
-        patience=3,
+        batch_size=1024,
+        lr=1e-3,
+        patience=2,
     )
     print("[GRU] Done")
     exit()

@@ -1,48 +1,44 @@
-# models/GRU.py
-
+# src/pipeline/models/GRU.py
+from __future__ import annotations
+import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class MicroTrendGRU(nn.Module):
     """
-    A GRU-based classifier for microtrend prediction.
-
-    Parameters
-    ----------
-    input_dim : int
-        Number of input features per time step.
-    hidden_dim : int, default=128
-        Dimension of GRU hidden state.
-    num_layers : int, default=1
-        Number of stacked GRU layers.
-    num_classes : int, default=3
-        Number of output classes.
-    dropout : float, default=0.1
-        Dropout rate applied to GRU outputs before the final layer.
+    Двуслойный bidirectional-GRU + mean-pool + классификатор.
+    Выход: logits и сам hidden-вектор (B, D*2).
     """
 
     def __init__(
-            self,
-            input_dim: int,
-            hidden_dim: int = 128,
-            num_layers: int = 1,
-            num_classes: int = 3,
-            dropout: float = 0.1
+        self,
+        input_dim: int,
+        hidden_dim: int = 256,
+        num_layers: int = 2,
+        num_classes: int = 3,
+        dropout: float = 0.2,
+        bidirectional: bool = True,
     ):
         super().__init__()
+        self.bidirectional = bidirectional
         self.gru = nn.GRU(
             input_size=input_dim,
             hidden_size=hidden_dim,
             num_layers=num_layers,
             batch_first=True,
-            dropout=dropout if num_layers > 1 else 0.0
+            dropout=dropout if num_layers > 1 else 0.0,
+            bidirectional=bidirectional,
         )
-        self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(hidden_dim, num_classes)
+        d_out = hidden_dim * (2 if bidirectional else 1)
+        self.head = nn.Sequential(
+            nn.LayerNorm(d_out),
+            nn.Dropout(dropout),
+            nn.Linear(d_out, num_classes),
+        )
 
-    def forward(self, x):
-        gru_out, h_n = self.gru(x)
-        last_h = h_n[-1]
-        out = self.dropout(last_h)
-        logits = self.fc(out)
-        return logits, last_h
+    def forward(self, x):                              # x: (B, L, F)
+        seq_out, _ = self.gru(x)                       # (B, L, D*dir)
+        emb = seq_out.mean(1)                          # mean-pool
+        logits = self.head(emb)                        # (B, C)
+        return logits, emb                             # emb пригодится как feature

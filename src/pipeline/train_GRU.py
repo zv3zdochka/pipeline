@@ -1,165 +1,179 @@
+# src/pipeline/train_GRU.py
+
 from __future__ import annotations
 
+import functools
 import pathlib
-import warnings
 import joblib
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.nn.functional import cross_entropy
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from torch.utils.tensorboard import SummaryWriter
 from sklearn.metrics import accuracy_score, f1_score
+
+from .prepare_dataset_GRU import GRUSequenceDataset
 from .models.GRU import MicroTrendGRU
 
 
-def _compute_class_weights_from_labels(labels: np.ndarray) -> torch.Tensor:
+def focal_loss(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    *,
+    gamma: float = 2.0,
+    alpha: list[float] | None = None,
+) -> torch.Tensor:
     """
-    Compute inverse-frequency class weights from an array of integer labels [0,1,2].
+    Focal loss с фокус-фактором gamma и весами alpha (inverse freq).
+    Если alpha=None, используются единичные весы.
     """
-    counts = np.bincount(labels, minlength=3)
-    total = counts.sum()
-    weights = total / np.maximum(counts, 1)
-    weights = weights / weights.mean()
-    return torch.tensor(weights, dtype=torch.float32)
+    if alpha is None:
+        alpha = [1.0] * logits.size(1)
+    alpha_t = torch.tensor(alpha, device=logits.device)[target]    # (B,)
+    ce = cross_entropy(logits, target, reduction="none")          # (B,)
+    pt = torch.exp(-ce)
+    return (alpha_t * (1.0 - pt).pow(gamma) * ce).mean()
 
 
 def train_gru(
-        train_pkl: str | pathlib.Path,
-        test_pkl: str | pathlib.Path,
-        class_freqs_pt: str | pathlib.Path,
-        events_pkl: str | pathlib.Path,
-        emb_path: str | pathlib.Path,
-        model_out: str = "gru_model.pt",
-        emb_out: str = "gru_embeddings.parquet",
-        seq_len: int = 96,
-        epochs: int = 20,
-        batch_size: int = 128,
-        lr: float = 3e-4,
-        patience: int = 3,
-        device: str | None = None
+    *,
+    train_pkl: str | pathlib.Path,
+    test_pkl:  str | pathlib.Path,
+    class_freqs_pt: str | pathlib.Path,  # остаётся для совместимости, но не нужен
+    events_pkl:    str | pathlib.Path,   # тоже больше не используем
+    emb_path:      str | pathlib.Path,   # idem
+    model_out:    str | pathlib.Path = "gru_model.pt",
+    emb_out:      str | pathlib.Path = "gru_embeddings.parquet",
+    seq_len:      int = 96,
+    epochs:       int = 20,
+    batch_size:   int = 128,
+    lr:          float = 1e-3,
+    patience:     int = 5,
+    device:      str | None = None,
 ):
     """
-    Train a GRU to predict microtrend labels with early stopping, learning-rate scheduling,
-    and logging to TensorBoard. Embeddings of the hidden state are extracted after training.
+    Обучение GRU с focal_loss, AdamW + ReduceLROnPlateau по val_f1 и ранней остановкой по F1.
     """
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[GRU] Using device: {device}")
+    print(f"[GRU] device → {device}")
 
-    print(f"[GRU] Loading train dataset from {train_pkl}")
-    ds_train = joblib.load(train_pkl)
-    print(f"[GRU] Loading validation dataset from {test_pkl}")
-    ds_val = joblib.load(test_pkl)
+    # --- Загружаем уже готовые GRUSequenceDataset из pickle ---
+    train_ds: GRUSequenceDataset = joblib.load(train_pkl)
+    val_ds:   GRUSequenceDataset = joblib.load(test_pkl)
 
-    loader_train = DataLoader(ds_train, batch_size=batch_size, shuffle=True,
-                              num_workers=4, pin_memory=(device == "cuda"))
-    loader_val = DataLoader(ds_val, batch_size=batch_size, shuffle=False,
-                            num_workers=4, pin_memory=(device == "cuda"))
+    # --- Считаем alpha для focal_loss по распределению оконных меток ---
+    #    Метки в датасете — уже {0,1,2}, то есть (microtrend_label+1)
+    labels = train_ds.labels  # numpy array shape=(N,)
+    freq  = np.bincount(labels, minlength=3)
+    alpha = (freq.max() / np.clip(freq, 1, None)).tolist()
+    print(f"[GRU] focal alpha → {alpha}")
 
-    input_dim = ds_train.features.shape[1]
-    model = MicroTrendGRU(input_dim=input_dim).to(device)
+    # --- Сэмплер, чтобы дополнительно балансировать выборку (можно убрать, если не нужно) ---
+    #    Берём метки для окон: label для каждого окна = labels[seq_len-1:]
+    win_labels = labels[seq_len - 1 :]
+    sample_weights = torch.tensor([alpha[int(l)] for l in win_labels], dtype=torch.double)
+    sampler = WeightedRandomSampler(
+        weights=sample_weights,
+        num_samples=len(sample_weights),
+        replacement=True,
+    )
+
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=batch_size,
+        sampler=sampler,
+        num_workers=4,
+        pin_memory=(device == "cuda"),
+    )
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=(device == "cuda"),
+    )
+
+    # --- Модель, оптимизатор, scheduler, tensorboard ---
+    model = MicroTrendGRU(input_dim=train_ds.features.shape[1]).to(device)
     print("[GRU] Model initialized.")
 
-    weights = _compute_class_weights_from_labels(ds_train.labels).to(device)
-    criterion = nn.CrossEntropyLoss(weight=weights)
+    loss_fn = functools.partial(focal_loss, gamma=2.0, alpha=alpha)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    scheduler = ReduceLROnPlateau(optimizer, mode="max", factor=0.5, patience=2, verbose=True)
 
     writer = SummaryWriter(log_dir="cache/runs/GRU")
-    best_val_loss = float("inf")
-    best_epoch = 0
-    best_state = None
 
-    print(f"[GRU] Starting training for up to {epochs} epochs")
+    best_f1 = 0.0
+    no_improve = 0
+
+    # --- Цикл обучения ---
     for epoch in range(1, epochs + 1):
+        # train
         model.train()
-        train_losses = []
-        for X, y in loader_train:
+        total_loss = 0.0
+        for X, y in train_loader:
             X, y = X.to(device), y.to(device)
             optimizer.zero_grad()
             logits, _ = model(X)
-            loss = criterion(logits, y)
+            loss = loss_fn(logits, y)
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
-            train_losses.append(loss.item())
+            total_loss += loss.item() * X.size(0)
+        train_loss = total_loss / len(train_loader.dataset)
 
-        scheduler.step()
-
+        # validation
         model.eval()
-        val_losses, all_preds, all_trues = [], [], []
+        preds, trues = [], []
         with torch.no_grad():
-            for X, y in loader_val:
+            for X, y in val_loader:
                 X, y = X.to(device), y.to(device)
                 logits, _ = model(X)
-                loss = criterion(logits, y)
-                val_losses.append(loss.item())
-                preds = logits.argmax(dim=1).cpu().numpy()
-                all_preds.append(preds)
-                all_trues.append(y.cpu().numpy())
+                p = logits.argmax(1).cpu().numpy()
+                preds.extend(p)
+                trues.extend(y.cpu().numpy())
 
-        mean_train_loss = np.mean(train_losses)
-        mean_val_loss = np.mean(val_losses)
-        all_preds = np.concatenate(all_preds)
-        all_trues = np.concatenate(all_trues)
-        val_acc = accuracy_score(all_trues, all_preds)
-        val_f1 = f1_score(all_trues, all_preds, average="macro")
+        val_f1  = f1_score(trues, preds, average="macro", zero_division=0)
+        val_acc = accuracy_score(trues, preds)
 
-        writer.add_scalars("Loss", {"train": mean_train_loss, "val": mean_val_loss}, epoch)
-        writer.add_scalars("Metrics", {"val_acc": val_acc, "val_f1": val_f1}, epoch)
+        # шаг scheduler по метрике
+        scheduler.step(val_f1)
 
-        print(
-            f"[GRU][Epoch {epoch}] train_loss={mean_train_loss:.4f}, val_loss={mean_val_loss:.4f}, val_acc={val_acc:.4f}, val_f1={val_f1:.4f}")
+        # логгируем
+        writer.add_scalar("loss/train", train_loss, epoch)
+        writer.add_scalar("acc/val",   val_acc,    epoch)
+        writer.add_scalar("f1/val",    val_f1,     epoch)
+        print(f"[GRU][Epoch {epoch:02d}/{epochs}] "
+              f"train_loss={train_loss:.4f}  "
+              f"val_acc={val_acc:.3f}  val_f1={val_f1:.3f}")
 
-        if mean_val_loss < best_val_loss:
-            best_val_loss = mean_val_loss
-            best_epoch = epoch
-            best_state = model.state_dict()
-            print(f"[GRU] New best model at epoch {epoch}, val_loss={mean_val_loss:.4f}")
-        elif epoch - best_epoch >= patience:
-            print(f"[GRU] Early stopping at epoch {epoch}. Best epoch was {best_epoch}.")
-            break
+        # ранняя остановка по F1
+        if val_f1 > best_f1:
+            best_f1 = val_f1
+            no_improve = 0
+            torch.save(model.state_dict(), model_out)
+            print(f"  ↳ new best F1={best_f1:.3f} (model saved → {model_out})")
+        else:
+            no_improve += 1
+            if no_improve >= patience:
+                print(f"  ↳ early stopping (no improve for {patience} epochs)")
+                break
 
     writer.close()
+    print(f"[GRU] best F1 = {best_f1:.3f}")
 
-    if best_state is not None:
-        torch.save(best_state, model_out)
-        print(f"[GRU] Saved best model state_dict to {model_out}")
-
-    # extract hidden embeddings using the best model
-    model.load_state_dict(torch.load(model_out))
+    # --- Сохраняем эмбеддинги последней эпохи на валидации ---
+    model.load_state_dict(torch.load(model_out, map_location=device))
     model.eval()
     embs = []
     with torch.no_grad():
-        for X, _ in DataLoader(ds_train, batch_size=batch_size, shuffle=False,
-                               num_workers=4, pin_memory=(device == "cuda")):
+        for X, _ in val_loader:
             X = X.to(device)
             _, h = model(X)
             embs.append(h.cpu())
-        for X, _ in DataLoader(ds_val, batch_size=batch_size, shuffle=False,
-                               num_workers=4, pin_memory=(device == "cuda")):
-            X = X.to(device)
-            _, h = model(X)
-            embs.append(h.cpu())
-
-    gru_emb = torch.cat(embs, dim=0).numpy()
-
-    try:
-        df_orig = (pd.read_parquet(emb_path) if emb_path.endswith(".parquet")
-                   else pd.read_csv(emb_path, index_col=0, parse_dates=True))
-        ts_idx = df_orig.index[seq_len - 1: seq_len - 1 + len(gru_emb)]
-        print(f"[GRU] Aligned embeddings to original timestamps from {emb_path}")
-    except Exception:
-        warnings.warn("Falling back to raw events timestamps")
-        print("[GRU] Falling back to raw events timestamps")
-        ev = joblib.load(events_pkl).set_index("ts").sort_index()
-        ts_idx = ev.index[seq_len - 1: seq_len - 1 + len(gru_emb)]
-
-    df_out = pd.DataFrame(gru_emb, index=ts_idx)
-    try:
-        df_out.to_parquet(emb_out)
-        print(f"[GRU] Saved embeddings to {emb_out}")
-    except Exception:
-        csv_out = emb_out.replace(".parquet", ".csv")
-        df_out.to_csv(csv_out)
-        print(f"[GRU] Saved embeddings to {csv_out}")
+    emb_mat = torch.cat(embs, dim=0).numpy()
+    pd.DataFrame(emb_mat).to_parquet(emb_out)
+    print(f"[GRU] embeddings → {emb_out}")
