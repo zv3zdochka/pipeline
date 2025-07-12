@@ -20,13 +20,10 @@ from .models.WaveNetCNN import WaveCNN
 def make_loader(df, window, batch, shuffle):
     ds = CNNWindowDataset(df, window_size=window)
     return DataLoader(ds, batch_size=batch, shuffle=shuffle,
-                      pin_memory=True, num_workers=2)
+                      pin_memory=torch.cuda.is_available(), num_workers=2)
 
 
 def get_class_weights(y_labels: np.ndarray) -> torch.Tensor:
-    """
-    Compute balanced class weights for labels in {-1, 0, 1}.
-    """
     classes = np.array([-1, 0, 1])
     weights = compute_class_weight(
         class_weight="balanced",
@@ -51,10 +48,15 @@ def train_wavecnn(
         device: str = None
 ):
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[WAVECNN] Using device: {device}")
+
     log_dir = log_dir or "runs/wavecnn"
     writer = SummaryWriter(log_dir)
+    print(f"[WAVECNN] TensorBoard logs -> {log_dir}")
 
+    print(f"[WAVECNN] Loading train dataset from {train_pkl}")
     train_df = joblib.load(train_pkl)
+    print(f"[WAVECNN] Loading test  dataset from {test_pkl}")
     test_df = joblib.load(test_pkl)
 
     train_loader = make_loader(train_df, window, batch, shuffle=True)
@@ -64,9 +66,11 @@ def train_wavecnn(
         in_channels=train_df.shape[1] - 1,
         window_size=window
     ).to(device)
+    print(f"[WAVECNN] Model initialized with window_size={window}")
 
     y_train = train_df["microtrend_label"].to_numpy()
     weights = get_class_weights(y_train).to(device)
+    print(f"[WAVECNN] Class weights: {weights.tolist()}")
 
     loss_fn = torch.nn.CrossEntropyLoss(weight=weights)
     optim = torch.optim.AdamW(model.parameters(), lr=lr)
@@ -80,6 +84,7 @@ def train_wavecnn(
         ],
         milestones=[warmup_epochs]
     )
+    print(f"[WAVECNN] Scheduler: {warmup_epochs}-epoch warmup + CosineAnnealingLR")
 
     acc_metric = Accuracy(task="multiclass", num_classes=3).to(device)
     f1_metric = F1Score(task="multiclass", num_classes=3, average="macro").to(device)
@@ -93,7 +98,7 @@ def train_wavecnn(
 
         for x, y in train_loader:
             x = x.to(device)
-            y = (y + 1).to(device)
+            y = (y + 1).to(device)  # -1/0/1 -> 0/1/2
 
             optim.zero_grad()
             logits, _ = model(x)
@@ -126,20 +131,22 @@ def train_wavecnn(
         writer.add_scalar("val/accuracy", val_acc, epoch)
         writer.add_scalar("val/f1", val_f1, epoch)
 
-        print(f"[Epoch {epoch}] loss={avg_loss:.4f} acc={val_acc:.3f} f1={val_f1:.3f}")
+        print(f"[WAVECNN] [Epoch {epoch}/{epochs}] "
+              f"loss={avg_loss:.4f} acc={val_acc:.3f} f1={val_f1:.3f}")
 
         if val_f1 > best_f1:
             best_f1 = val_f1
             early_stop_counter = 0
             torch.save(model.state_dict(), model_out)
+            print(f"[WAVECNN] Saved best model to {model_out}")
         else:
             early_stop_counter += 1
             if early_stop_counter >= 3:
-                print("Early stopping triggered")
+                print(f"[WAVECNN] Early stopping triggered at epoch {epoch}")
                 break
 
     writer.close()
-    print(f"Best test F1: {best_f1:.3f}")
+    print(f"[WAVECNN] Best test F1: {best_f1:.3f}")
 
     model.load_state_dict(torch.load(model_out))
     model.eval()
@@ -156,4 +163,4 @@ def train_wavecnn(
     except Exception:
         emb_df.to_csv(pathlib.Path(emb_out).with_suffix(".csv"))
         warnings.warn("Saved embeddings as CSV instead of parquet")
-    print(f"Embeddings saved to {emb_out}")
+    print(f"[WAVECNN] Embeddings saved to {emb_out}")
