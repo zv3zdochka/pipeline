@@ -28,7 +28,7 @@ CACHE_DIR = pathlib.Path("cache")
 CACHE_DIR = pathlib.Path(__file__).parent / "cache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-CSV_PATH = pathlib.Path(__file__).parent.parent / "data" / "XRPUSDT_merge_30d.csv"
+CSV_PATH = pathlib.Path(__file__).parent.parent / "data" / "XRPUSDT_merge_180d.csv"
 
 
 def main() -> None:
@@ -62,12 +62,12 @@ def main() -> None:
     # Save outputs
     save_dataset_and_distribution(dataset)
 
-    dataset = expand_dataset(dataset, n=6, noise_sigma=0.003)
-
-    dataset.to_csv(f"{CACHE_DIR / 'dataset.csv'}", index=False)
-
-    dist_aug = dataset['microtrend_label'].value_counts().sort_index()
-    print(f"[EXPANDED DISTRIBUTION] {dist_aug.to_dict()}")
+    # dataset = expand_dataset(dataset, n=6, noise_sigma=0.003)
+    #
+    # dataset.to_csv(f"{CACHE_DIR / 'dataset.csv'}", index=False)
+    #
+    # dist_aug = dataset['microtrend_label'].value_counts().sort_index()
+    # print(f"[EXPANDED DISTRIBUTION] {dist_aug.to_dict()}")
 
     # Wavelet + 1D-CNN
     print(f"[WAVECNN] Starting CNN dataset preparation")
@@ -135,6 +135,8 @@ def main() -> None:
         patience=3,
     )
     print("[GRU] Done")
+    print("[TIMESNET] DATA PREP STARTED")
+
     prepare_timesnet_dataset(
         df=dataset,
         seq_len=288,
@@ -143,8 +145,9 @@ def main() -> None:
         test_dataset_path=CACHE_DIR / "timesnet_test.pt",
         scaler_path=CACHE_DIR / "timesnet_scaler.pkl",
     )
+    print("[TIMESNET] DATA PREP COMPLETED")
 
-    # ---- 2. обучение ----
+    print("[TIMESNET] TRAINING STARTED")
     train_timesnet(
         train_pt=str(CACHE_DIR / "timesnet_train.pt"),
         test_pt=str(CACHE_DIR / "timesnet_test.pt"),
@@ -157,35 +160,32 @@ def main() -> None:
         batch_size=256,
         lr=3e-4,
     )
+    print(f"[TIMESNET] Training completed")
 
     print("[MAIN] All steps completed successfully.")
-    exit()
 
-    # ------------------------------------------------------------------ #
-    # 6. Собираем TFT-датасет и обучаем TFT
-    # ------------------------------------------------------------------ #
-    # интеграция TimesNet
-    tn_pred = pd.read_parquet(CACHE_DIR / "timesnet_forecast.parquet")
-    tn_emb = pd.read_parquet(CACHE_DIR / "timesnet_embeddings.parquet")
-    dataset = (
-        dataset
-        .set_index("ts")
-        .join(tn_pred)
-        .join(tn_emb)
-        .reset_index()
-    )
-
-    ds, groups = prepare_tft_dataset(
+    print("[TFT] DATA PREP STARTED")
+    full_dataset, feature_groups = prepare_tft_dataset(
         df_events=CACHE_DIR / "imputed_events.pkl",
         cnn_emb_path=CACHE_DIR / "cnn_embeddings.parquet",
         gru_emb_path=CACHE_DIR / "gru_embeddings.parquet",
         timesnet_emb_path=CACHE_DIR / "timesnet_embeddings.parquet",
         timesnet_pred_path=CACHE_DIR / "timesnet_forecast.parquet",
         seq_len=96,
-        dataset_path=CACHE_DIR / "tft_dataset.pt",
         scaler_path=CACHE_DIR / "tft_scaler.pkl",
+        dataset_path=CACHE_DIR / "tft_full_dataset.pt",
+        train_size=0.8,
+        train_features_path=CACHE_DIR / "tft_train_features.npy",
+        train_targets_path=CACHE_DIR / "tft_train_targets.npy",
+        test_features_path=CACHE_DIR / "tft_test_features.npy",
+        test_targets_path=CACHE_DIR / "tft_test_targets.npy",
+        strict=False,
     )
-    joblib.dump(groups, CACHE_DIR / "tft_feature_groups.pkl")
+    joblib.dump(feature_groups, CACHE_DIR / "tft_feature_groups.pkl")
+    print("[TFT] DATA PREP COMPLETED\n")
+
+
+    exit()
 
     train_tft(
         dataset_pt=CACHE_DIR / "tft_dataset.pt",

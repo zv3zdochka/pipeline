@@ -1,4 +1,6 @@
 # src/pipeline/prepare_dataset_TFT.py
+from __future__ import annotations
+
 import pathlib
 import warnings
 from typing import Sequence, Mapping
@@ -11,14 +13,12 @@ from torch.utils.data import Dataset
 from sklearn.preprocessing import StandardScaler
 
 
-# ----------------------------- #
-# 1.  Dataset-класс
-# ----------------------------- #
 class TFTDataset(Dataset):
     """
-    (X, y) где
-      X.shape == [seq_len, D]  — окно признаков
-      y.shape == []            — скаляр-таргет (int/float)
+    A PyTorch Dataset for TFT.
+    Each item is a tuple (X_window, y_target):
+      - X_window: Tensor of shape [seq_len, D]
+      - y_target: Tensor scalar (int/float)
     """
 
     def __init__(self, X: np.ndarray, y: np.ndarray):
@@ -32,9 +32,6 @@ class TFTDataset(Dataset):
         return self.X[idx], self.y[idx]
 
 
-# ----------------------------- #
-# 2.  Основная обёртка
-# ----------------------------- #
 def prepare_tft_dataset(
         df_events: pd.DataFrame | str | pathlib.Path,
         cnn_emb_path: str | pathlib.Path,
@@ -46,34 +43,22 @@ def prepare_tft_dataset(
         target_col: str = "microtrend_label",
         scaler_path: str | pathlib.Path = "tft_scaler.pkl",
         dataset_path: str | pathlib.Path = "tft_dataset.pt",
+        train_size: float = 0.8,
+        train_dataset_path: str | pathlib.Path = "tft_train.pt",
+        test_dataset_path: str | pathlib.Path = "tft_test.pt",
         strict: bool = False,
 ) -> tuple[TFTDataset, Mapping[str, Sequence[str]]]:
     """
-    Собирает полный набор признаков для TFT, строит окна и возвращает `TFTDataset`.
-
-    Parameters
-    ----------
-    df_events : DataFrame | path
-        Результат `prepare_tft_features()` + метки (`label_microtrend`),
-        либо путь к pickle/CSV.
-    cnn_emb_path / gru_emb_path / timesnet_emb_path / timesnet_pred_path :
-        Пути к parquet/CSV с эмбеддингами и прогнозами.
-    seq_len : int
-        Длина временного окна.
-    target_col : str
-        Имя колонки-таргета.
-    strict : bool
-        Если True — бросать ошибку при отсутствии нужных колонок,
-        иначе — лишь предупреждать.
+    Assemble features for TFT, split into train/test, build sliding windows,
+    fit scaler on train, transform both splits, and save all datasets & scaler.
 
     Returns
     -------
-    ds : TFTDataset
-    feature_groups : dict
-        {'continuous': [...], 'categorical': [...], 'binary': [...]}
+    full_dataset : TFTDataset
+    feature_groups : dict[str, list[str]]
     """
 
-    # ---------- 2.1  загружаем базу событий ----------
+    # 1. load events table
     if isinstance(df_events, (str, pathlib.Path)):
         df_events = (
             joblib.load(df_events)
@@ -82,100 +67,90 @@ def prepare_tft_dataset(
         )
     df_events = df_events.set_index("ts").sort_index()
 
-    # ---------- 2.2  подгружаем эмбеддинги / прогнозы ----------
+    # 2. load embeddings / forecasts
     def _read_parquet_any(path):
         p = pathlib.Path(path)
-        if p.suffix == ".parquet":
-            return pd.read_parquet(p)
-        return pd.read_csv(p, index_col=0, parse_dates=True)
+        return pd.read_parquet(p) if p.suffix == ".parquet" else pd.read_csv(p, index_col=0, parse_dates=True)
 
-    df_cnn = _read_parquet_any(cnn_emb_path)
-    df_gru = _read_parquet_any(gru_emb_path)
-    df_tn_emb = _read_parquet_any(timesnet_emb_path)
+    df_cnn = _read_parquet_any(cnn_emb_path).add_prefix("cnn_emb_")
+    df_gru = _read_parquet_any(gru_emb_path).add_prefix("gru_emb_")
+    df_tn_emb = _read_parquet_any(timesnet_emb_path).add_prefix("timesnet_emb_")
     df_tn_pred = _read_parquet_any(timesnet_pred_path)
 
-    # именуем столбцы уникально
-    df_cnn = df_cnn.add_prefix("cnn_emb_")
-    df_gru = df_gru.add_prefix("gru_emb_")
-    df_tn_emb = df_tn_emb.add_prefix("timesnet_emb_")
-
-    # ---------- 2.3  объединяем ----------
+    # 3. join all
     df_all = (
-        df_events.join(df_cnn, how="inner")
+        df_events
+        .join(df_cnn, how="inner")
         .join(df_gru, how="inner")
         .join(df_tn_emb, how="inner")
         .join(df_tn_pred, how="inner")
         .sort_index()
     )
 
-    # ---------- 2.4  проверяем наличие колонки-таргета ----------
     if target_col not in df_all.columns:
         raise KeyError(f"target column '{target_col}' not found in dataframe")
 
-    # ----------------------------------------------------------------------------
-    # 3.  Определяем группы признаков
-    # ----------------------------------------------------------------------------
-    # categorical
-    categorical_cols = [
-        c for c in df_all.columns if c.endswith("_code")
-    ]
-    # binary flags
-    binary_cols = [
-        c
-        for c in df_all.columns
-        if c.endswith("_na") or c.endswith("_was_missing")
-    ]
-    # все остальное, кроме таргета
+    # 4. define feature groups
+    categorical_cols = [c for c in df_all.columns if c.endswith("_code")]
+    binary_cols = [c for c in df_all.columns if c.endswith("_na") or c.endswith("_was_missing")]
     all_numeric = df_all.select_dtypes(include="number").columns.tolist()
     continuous_cols = [
-        c
-        for c in all_numeric
-        if c not in categorical_cols
-           and c not in binary_cols
-           and c != target_col
+        c for c in all_numeric
+        if c not in categorical_cols and c not in binary_cols and c != target_col
     ]
 
-    # ---------- 3.1  проверяем пропущенные обязательные continuous ----------
-    must_exist = continuous_cols  # их очень много — проверим позже, если захотим
-    missing = [c for c in must_exist if c not in df_all.columns]
+    missing = [c for c in continuous_cols if c not in df_all.columns]
     if missing:
         msg = f"[prepare_tft_dataset] missing columns: {missing}"
         if strict:
             raise KeyError(msg)
         warnings.warn(msg)
 
-    # ----------------------------------------------------------------------------
-    # 4.  Масштабируем continuous-часть
-    # ----------------------------------------------------------------------------
+    # 5. split into train/test by time
+    n_total = len(df_all)
+    split_idx = int(n_total * train_size)
+    # train windows use only indices [seq_len, split_idx)
+    # test windows may use past history (including train) for sliding window
+    df_train = df_all.iloc[:split_idx]
+    df_test = df_all.iloc[split_idx - seq_len:]  # include overlap for initial windows
+
+    # 6. fit scaler on train, transform both
     scaler = StandardScaler()
-    df_all[continuous_cols] = scaler.fit_transform(df_all[continuous_cols].astype("float32"))
+    df_train[continuous_cols] = scaler.fit_transform(df_train[continuous_cols].astype("float32"))
+    df_test[continuous_cols] = scaler.transform(df_test[continuous_cols].astype("float32"))
 
-    # (категориальные и бинарные оставляем без изменений)
-
-    # ----------------------------------------------------------------------------
-    # 5.  формируем X, y, делаем окна
-    # ----------------------------------------------------------------------------
+    # 7. build sliding windows for train
     feature_cols = continuous_cols + categorical_cols + binary_cols
-    X_all = df_all[feature_cols].astype("float32").values
-    y_all = df_all[target_col].values  # dtype сохраняем как есть (int8 / float)
+    X_train_windows, y_train = [], []
+    for i in range(seq_len, len(df_train)):
+        window = df_train.iloc[i - seq_len: i][feature_cols].values.astype("float32")
+        X_train_windows.append(window)
+        y_train.append(df_train[target_col].iloc[i])
+    X_train = np.stack(X_train_windows, axis=0)
+    y_train = np.asarray(y_train)
 
-    sequences, targets = [], []
-    for i in range(seq_len, len(df_all)):
-        sequences.append(X_all[i - seq_len: i])
-        targets.append(y_all[i])
+    # 8. build sliding windows for test
+    X_test_windows, y_test = [], []
+    # note: i indexes into df_test; original df_all index = split_idx - seq_len + i
+    for i in range(seq_len, len(df_test)):
+        window = df_test.iloc[i - seq_len: i][feature_cols].values.astype("float32")
+        X_test_windows.append(window)
+        # target taken from df_all at global index
+        global_i = split_idx - seq_len + i
+        y_test.append(df_all[target_col].iloc[global_i])
+    X_test = np.stack(X_test_windows, axis=0)
+    y_test = np.asarray(y_test)
 
-    X_arr = np.stack(sequences, axis=0)  # shape [N, seq_len, D]
-    y_arr = np.asarray(targets)
-
-    # ----------------------------------------------------------------------------
-    # 6.  сохраняем
-    # ----------------------------------------------------------------------------
+    # 9. save scaler and datasets
     joblib.dump(scaler, scaler_path)
-    torch.save({"X": X_arr, "y": y_arr}, dataset_path)
+    torch.save({"X": df_all[feature_cols].astype("float32").values.reshape(-1, len(feature_cols)),
+                "y": df_all[target_col].values}, dataset_path)
+    torch.save({"X": X_train, "y": y_train}, train_dataset_path)
+    torch.save({"X": X_test, "y": y_test}, test_dataset_path)
 
     groups = {
         "continuous": continuous_cols,
         "categorical": categorical_cols,
         "binary": binary_cols,
     }
-    return TFTDataset(X_arr, y_arr), groups
+    return TFTDataset(df_all[feature_cols].values.reshape(-1, len(feature_cols)), df_all[target_col].values), groups

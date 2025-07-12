@@ -36,7 +36,6 @@ def prepare_timesnet_dataset(
         train_ratio: float = 0.8,
         strict: bool = False,
 ):
-    print("[TIMESNET] DATA PREP STARTED")
 
     default_cols = [
         "ohlcv_5m_open", "ohlcv_5m_high", "ohlcv_5m_low",
@@ -117,7 +116,6 @@ def prepare_timesnet_dataset(
         )
         print("[TIMESNET] Saved combined dataset to timesnet_dataset.pt")
 
-    print("[TIMESNET] DATA PREP COMPLETED")
     return (
         TimesNetDataset(Xtr, ytr),
         TimesNetDataset(Xte, yte),

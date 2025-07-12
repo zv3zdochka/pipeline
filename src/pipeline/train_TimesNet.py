@@ -4,6 +4,7 @@ import joblib
 import torch
 import pandas as pd
 import torch.nn as nn
+import numpy as np
 from sklearn.metrics import f1_score
 from torch.utils.data import DataLoader
 
@@ -37,7 +38,6 @@ def train_timesnet(
         lr: float = 3e-4,
         device: str | None = None,
 ):
-    print("[TIMESNET] TRAINING STARTED")
     train_raw = torch.load(train_pt, weights_only=False)
     X_train, y_train = train_raw["X"], train_raw["y"]
     print(f"[TIMESNET] Loaded train set: {len(X_train)} samples")
@@ -80,7 +80,7 @@ def train_timesnet(
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optim, mode="min", patience=3, factor=0.5, verbose=True
     )
-    scaler = torch.cuda.amp.GradScaler(enabled=device.startswith("cuda"))
+    scaler = torch.amp.GradScaler(enabled=device.startswith("cuda"))
 
     best_val = float("inf")
     patience = 6
@@ -92,7 +92,7 @@ def train_timesnet(
         for xb, yb in train_loader:
             xb, yb = xb.to(device), (yb + 1).to(device)
             optim.zero_grad()
-            with torch.cuda.amp.autocast(enabled=device.startswith("cuda")):
+            with torch.amp.autocast(device_type="cuda", enabled=device.startswith("cuda")):
                 logits, _ = model(xb)
                 loss = criterion(logits, yb)
             scaler.scale(loss).backward()
@@ -140,7 +140,8 @@ def train_timesnet(
     print("[TIMESNET] Generating embeddings and forecasts")
 
     full_ds = TimesNetDataset(
-        torch.cat([X_train, X_val]), torch.cat([y_train, y_val])
+        np.concatenate([X_train, X_val], axis=0),
+        np.concatenate([y_train, y_val], axis=0),
     )
     full_loader = _loader(full_ds, batch_size, shuffle=False)
 
