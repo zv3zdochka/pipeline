@@ -1,136 +1,159 @@
 # src/pipeline/train_WaveNetCNN.py
-
-import argparse
 import pathlib
-import joblib
 import warnings
-import torch
+
+import joblib
+import numpy as np
 import pandas as pd
+import torch
 from torch.utils.data import DataLoader
+from torch.optim.lr_scheduler import CosineAnnealingLR, SequentialLR, LinearLR
 from torch.nn.utils import clip_grad_norm_
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.utils.class_weight import compute_class_weight
+from torchmetrics import Accuracy, F1Score
+from torch.utils.tensorboard import SummaryWriter
 
 from .prepare_dataset_CNN import CNNWindowDataset
 from .models.WaveNetCNN import WaveCNN
 
 
-def _make_loader(df, window, batch, shuffle):
+def make_loader(df, window, batch, shuffle):
     ds = CNNWindowDataset(df, window_size=window)
-    return DataLoader(ds, batch_size=batch, shuffle=shuffle, pin_memory=True, num_workers=2)
+    return DataLoader(ds, batch_size=batch, shuffle=shuffle,
+                      pin_memory=True, num_workers=2)
 
 
-def _compute_class_weights(freqs: dict[int, int]) -> torch.Tensor:
-    total = sum(freqs.values())
-    weights = torch.tensor(
-        [total / max(freqs.get(lbl, 1), 1) for lbl in (-1, 0, 1)],
-        dtype=torch.float32,
+def get_class_weights(y_labels: np.ndarray) -> torch.Tensor:
+    """
+    Compute balanced class weights for labels in {-1, 0, 1}.
+    """
+    classes = np.array([-1, 0, 1])
+    weights = compute_class_weight(
+        class_weight="balanced",
+        classes=classes,
+        y=y_labels
     )
-    return weights / weights.mean()
-
-
-def _safe_save_embeddings(emb_df: pd.DataFrame, path: str | pathlib.Path) -> None:
-    path = pathlib.Path(path)
-    try:
-        emb_df.to_parquet(path)
-    except (ImportError, ValueError):
-        emb_df.to_csv(path.with_suffix(".csv"), index=True)
-        warnings.warn("pyarrow/fastparquet not installed – saved embeddings as CSV instead.", RuntimeWarning)
+    return torch.tensor(weights, dtype=torch.float32)
 
 
 def train_wavecnn(
-    dataset_pkl: str | pathlib.Path,
-    class_freqs_pt: str | pathlib.Path,
-    model_out: str | pathlib.Path = "wavecnn_model.pt",
-    emb_out: str | pathlib.Path = "cnn_embeddings.parquet",
-    window: int = 24,
-    epochs: int = 10,
-    batch: int = 256,
-    lr: float = 3e-4,
-    device: str | None = None,               # ← добавлено
+        train_pkl: str | pathlib.Path,
+        test_pkl: str | pathlib.Path,
+        class_freqs_pt: str | pathlib.Path,
+        model_out: str | pathlib.Path,
+        emb_out: str | pathlib.Path,
+        window: int = 24,
+        epochs: int = 10,
+        batch: int = 256,
+        lr: float = 3e-4,
+        warmup_epochs: int = 3,
+        log_dir: str | pathlib.Path = None,
+        device: str = None
 ):
-    # ---- устройство ----
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    log_dir = log_dir or "runs/wavecnn"
+    writer = SummaryWriter(log_dir)
 
-    # ---- 0. load ----
-    df: pd.DataFrame = joblib.load(dataset_pkl)
-    train_loader = _make_loader(df, window, batch, shuffle=True)
+    train_df = joblib.load(train_pkl)
+    test_df = joblib.load(test_pkl)
 
-    # ---- 1. model ----
-    model = WaveCNN(in_channels=len(df.columns) - 1).to(device)
+    train_loader = make_loader(train_df, window, batch, shuffle=True)
+    test_loader = make_loader(test_df, window, batch, shuffle=False)
 
-    class_freqs = torch.load(class_freqs_pt)
-    weights = _compute_class_weights(class_freqs).to(device)
+    model = WaveCNN(
+        in_channels=train_df.shape[1] - 1,
+        window_size=window
+    ).to(device)
+
+    y_train = train_df["microtrend_label"].to_numpy()
+    weights = get_class_weights(y_train).to(device)
 
     loss_fn = torch.nn.CrossEntropyLoss(weight=weights)
-    optim   = torch.optim.AdamW(model.parameters(), lr=lr)
+    optim = torch.optim.AdamW(model.parameters(), lr=lr)
 
-    # ---- 2. train ----
+    cosine = CosineAnnealingLR(optim, T_max=epochs - warmup_epochs, eta_min=1e-6)
+    scheduler = SequentialLR(
+        optim,
+        schedulers=[
+            LinearLR(optim, start_factor=0.01, end_factor=1.0, total_iters=warmup_epochs),
+            cosine
+        ],
+        milestones=[warmup_epochs]
+    )
+
+    acc_metric = Accuracy(task="multiclass", num_classes=3).to(device)
+    f1_metric = F1Score(task="multiclass", num_classes=3, average="macro").to(device)
+
+    best_f1 = 0.0
+    early_stop_counter = 0
+
     for epoch in range(1, epochs + 1):
         model.train()
-        epoch_loss, preds, gold = 0.0, [], []
-        for x, y_raw in train_loader:
-            # переносим на GPU/CPU
-            x_enc = x.to(device)
-            y_enc = (y_raw + 1).to(device)  # {-1,0,1} → {0,1,2}
+        train_loss = 0.0
+
+        for x, y in train_loader:
+            x = x.to(device)
+            y = (y + 1).to(device)
 
             optim.zero_grad()
-            logits, _ = model(x_enc)
-            loss = loss_fn(logits, y_enc)
+            logits, _ = model(x)
+            loss = loss_fn(logits, y)
             loss.backward()
             clip_grad_norm_(model.parameters(), 1.0)
             optim.step()
 
-            epoch_loss += loss.item() * y_enc.size(0)
-            pred_enc = logits.argmax(1).cpu()
-            preds.extend((pred_enc - 1).tolist())  # back to {-1,0,1}
-            gold.extend(y_raw.tolist())
+            train_loss += float(loss) * x.size(0)
 
-        acc = accuracy_score(gold, preds)
-        f1  = f1_score(gold, preds, average="macro")
-        print(f"[WaveCNN {epoch:02d}/{epochs}] loss={epoch_loss/len(df):.4f} | acc={acc:.3f} | f1={f1:.3f}")
+        scheduler.step()
 
-    torch.save(model.state_dict(), model_out)
-    print(f"[INFO] Saved model → {model_out}")
+        model.eval()
+        acc_metric.reset();
+        f1_metric.reset()
+        with torch.no_grad():
+            for x, y in test_loader:
+                x = x.to(device)
+                y_true = (y + 1).to(device)
+                logits, _ = model(x)
+                preds = logits.argmax(dim=1)
+                acc_metric.update(preds, y_true)
+                f1_metric.update(preds, y_true)
 
-    # ---- 3. embeddings ----
+        val_acc = acc_metric.compute().item()
+        val_f1 = f1_metric.compute().item()
+        avg_loss = train_loss / len(train_df)
+
+        writer.add_scalar("train/loss", avg_loss, epoch)
+        writer.add_scalar("val/accuracy", val_acc, epoch)
+        writer.add_scalar("val/f1", val_f1, epoch)
+
+        print(f"[Epoch {epoch}] loss={avg_loss:.4f} acc={val_acc:.3f} f1={val_f1:.3f}")
+
+        if val_f1 > best_f1:
+            best_f1 = val_f1
+            early_stop_counter = 0
+            torch.save(model.state_dict(), model_out)
+        else:
+            early_stop_counter += 1
+            if early_stop_counter >= 3:
+                print("Early stopping triggered")
+                break
+
+    writer.close()
+    print(f"Best test F1: {best_f1:.3f}")
+
+    model.load_state_dict(torch.load(model_out))
     model.eval()
     emb_list = []
-    ts_idx   = df.index[window - 1 :]
-    eval_loader = _make_loader(df, window, batch, shuffle=False)
-
     with torch.no_grad():
-        for x, _ in eval_loader:
-            x = x.to(device)                 # ← перенос
+        for x, _ in test_loader:
+            x = x.to(device)
             _, emb = model(x)
             emb_list.append(emb.cpu())
-
     emb_mat = torch.cat(emb_list).numpy()
-    emb_df  = pd.DataFrame(emb_mat, index=ts_idx)
-    _safe_save_embeddings(emb_df, emb_out)
-    print(f"[INFO] Saved embeddings → {emb_out}")
-
-
-if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="Train WaveNet+1D-CNN and export embeddings")
-    ap.add_argument("--dataset", default="wavecnn_dataset.pkl", help="path to serialized dataset")
-    ap.add_argument("--freqs",   default="class_freqs.pt",      help="path to class freqs")
-    ap.add_argument("--model",   default="wavecnn_model.pt",    help="where to save model weights")
-    ap.add_argument("--emb",     default="cnn_embeddings.parquet", help="where to save embeddings")
-    ap.add_argument("--epochs",  type=int, default=10,          help="number of epochs")
-    ap.add_argument("--window",  type=int, default=24,          help="CNN window size")
-    ap.add_argument("--batch",   type=int, default=256,         help="batch size")
-    ap.add_argument("--lr",      type=float, default=3e-4,       help="learning rate")
-    ap.add_argument("--device",  type=str, default=None,        help="cuda or cpu")
-    args = ap.parse_args()
-
-    train_wavecnn(
-        dataset_pkl=args.dataset,
-        class_freqs_pt=args.freqs,
-        model_out=args.model,
-        emb_out=args.emb,
-        epochs=args.epochs,
-        window=args.window,
-        batch=args.batch,
-        lr=args.lr,
-        device=args.device,                    # ← передаём device
-    )
+    emb_df = pd.DataFrame(emb_mat, index=test_df.index[window - 1:])
+    try:
+        emb_df.to_parquet(emb_out)
+    except Exception:
+        emb_df.to_csv(pathlib.Path(emb_out).with_suffix(".csv"))
+        warnings.warn("Saved embeddings as CSV instead of parquet")
+    print(f"Embeddings saved to {emb_out}")

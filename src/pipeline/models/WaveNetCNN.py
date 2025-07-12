@@ -1,64 +1,96 @@
 # models/WaveNetCNN.py
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.utils.parametrizations import weight_norm
 
 
 class CausalConv1d(nn.Conv1d):
-    def __init__(
-            self,
-            in_channels: int,
-            out_channels: int,
-            kernel_size: int,
-            dilation: int = 1,
-            **kwargs,
-    ):
-        super().__init__(
-            in_channels,
-            out_channels,
-            kernel_size,
-            padding=0,
-            dilation=dilation,
-            **kwargs,
-        )
-        self._left_pad = dilation * (kernel_size - 1)
+    """
+    Causal 1D convolution with left padding to enforce temporal causality.
+    """
+
+    def __init__(self, in_channels, out_channels, kernel_size, dilation=1):
+        super().__init__(in_channels, out_channels,
+                         kernel_size=kernel_size,
+                         dilation=dilation,
+                         padding=0)
+        self.left_pad = dilation * (kernel_size - 1)
 
     def forward(self, x):
-        x = F.pad(x, (self._left_pad, 0))
-        return super().forward(x)
+        x = F.pad(x, (self.left_pad, 0))
+        return super().forward(x).contiguous()
+
+
+class WaveletBlock(nn.Module):
+    """
+    Single residual block with gated activation (WaveNet-style),
+    weight normalization and dropout for regularization.
+    """
+
+    def __init__(self, channels, kernel_size, dilation):
+        super().__init__()
+        self.conv_filter = weight_norm(
+            CausalConv1d(channels, channels, kernel_size, dilation)
+        )
+        self.conv_gate = weight_norm(
+            CausalConv1d(channels, channels, kernel_size, dilation)
+        )
+        self.res_conv = nn.Conv1d(channels, channels, 1)
+        self.dropout = nn.Dropout(0.2)
+
+    def forward(self, x):
+        f = torch.tanh(self.conv_filter(x))
+        g = torch.sigmoid(self.conv_gate(x))
+        z = f * g
+        z = self.dropout(z)
+        res = self.res_conv(z)
+        return x + res, z
 
 
 class WaveCNN(nn.Module):
+    """
+    WaveCNN composed of multiple WaveletBlocks, batch normalization,
+    global pooling, and a classification head with dropout.
+    Number of blocks is chosen to cover the input window.
+    """
+
     def __init__(
             self,
-            in_channels: int,
-            emb_dim: int = 128,
-            num_classes: int = 3,
-            n_layers: int = 6,
-            kernel_size: int = 3,
-            dilation_base: int = 2,
+            in_channels,
+            emb_dim=128,
+            num_classes=3,
+            window_size=24,
+            kernel_size=3,
+            dilation_base=2
     ):
         super().__init__()
-
-        layers = []
+        # compute minimal number of blocks so that receptive_field ≥ window_size
+        import math
+        # receptive_field = 1 + (kernel_size-1) * (2^{num_blocks} - 1) * 2
+        # simplified: RF = 2^{num_blocks+1} - 1  for kernel_size=3
+        num_blocks = math.ceil(math.log2(window_size + 1)) - 1
+        self.input_bn = nn.BatchNorm1d(in_channels)
+        self.blocks = nn.ModuleList()
         channels = in_channels
-        for i in range(n_layers):
+        for i in range(num_blocks):
             dilation = dilation_base ** i
-            layers += [
-                CausalConv1d(
-                    channels,
-                    emb_dim,
-                    kernel_size,
-                    dilation=dilation,
-                ),
-                nn.ReLU(inplace=True),
-            ]
-            channels = emb_dim
-
-        self.conv_stack = nn.Sequential(*layers)
-        self.classifier = nn.Linear(emb_dim, num_classes)
+            self.blocks.append(
+                WaveletBlock(channels, kernel_size, dilation)
+            )
+        self.global_pool = nn.AdaptiveAvgPool1d(1)
+        self.classifier = nn.Sequential(
+            nn.Linear(channels, emb_dim),
+            nn.BatchNorm1d(emb_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.3),
+            nn.Linear(emb_dim, num_classes)
+        )
 
     def forward(self, x):
-        h = self.conv_stack(x)  # (B, C, T)
-        emb = h[:, :, -1]  # last time step
-        logits = self.classifier(emb)
-        return logits, emb
+        x = self.input_bn(x)
+        for block in self.blocks:
+            x, _ = block(x)
+        h = self.global_pool(x).squeeze(-1)
+        logits = self.classifier(h)
+        return logits, h

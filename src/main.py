@@ -39,46 +39,64 @@ def main() -> None:
 
     print_dataset_overview(df)
 
-    # 2. Prepare features and microtrend labels
+    # Prepare features and microtrend labels
     print("[MAIN] Step 2: Preparing features and microtrend labels...")
     dataset = prepare_features(df)
     print(f"[FEATURES] Features prepared: {dataset.shape[1]} features for {dataset.shape[0]} rows")
 
-    dataset['microtrend_label'] = label_microtrend(dataset, window=3, threshold=0.03)
+    dataset['microtrend_label'] = label_microtrend(dataset, window=36, threshold=0.03)
     print(f"[MICROTREND] Assigned microtrend labels: {dataset['microtrend_label'].nunique()} unique labels")
-    save_dataset_and_distribution(dataset)
 
     # Save outputs
-    dataset.to_csv(CACHE_DIR / "TFT.csv", index=False)
-    joblib.dump(dataset, CACHE_DIR / "imputed_events.pkl")
-    print(f"[MAIN] Saved TFT data to {CACHE_DIR / 'TFT.csv'} and pickle to imputed_events.pkl")
+    save_dataset_and_distribution(dataset)
 
-    print("[MAIN] All steps completed successfully.")
-
-    exit()
-
-    # ------------------------------------------------------------------ #
-    # 3. Wavelet + 1D-CNN
-    # ------------------------------------------------------------------ #
-    prepare_1dcnn_df(
+    # Wavelet + 1D-CNN
+    print(f"[WAVECNN] Starting CNN dataset preparation")
+    df_train, df_test, scaler_raw, scaler_wave = prepare_1dcnn_df(
         dataset,
         wavelet="db4",
         level=3,
         window_size=24,
+        train_frac=0.8,
         raw_scaler_path=CACHE_DIR / "scaler_raw.pkl",
         wave_scaler_path=CACHE_DIR / "scaler_wave.pkl",
-        dataset_path=CACHE_DIR / "wavecnn_dataset.pkl",
+        dataset_train_path=CACHE_DIR / "wavecnn_dataset_train.pkl",
+        dataset_test_path=CACHE_DIR / "wavecnn_dataset_test.pkl",
         class_freq_path=CACHE_DIR / "class_freqs.pt",
     )
+    print(f"[WAVECNN] Prepared datasets: "
+          f"{df_train.shape[0]} train samples, {df_test.shape[0]} test samples")
+    print(f"[WAVECNN] Saved raw scaler → {CACHE_DIR / 'scaler_raw.pkl'}, "
+          f"wavelet scaler → {CACHE_DIR / 'scaler_wave.pkl'}")
+    print(f"[WAVECNN] Saved datasets → "
+          f"{CACHE_DIR / 'wavecnn_dataset_train.pkl'} & {CACHE_DIR / 'wavecnn_dataset_test.pkl'}")
+    print(f"[WAVECNN] Class frequencies written to → {CACHE_DIR / 'class_freqs.pt'}")
+
     train_wavecnn(
-        dataset_pkl=str(CACHE_DIR / "wavecnn_dataset.pkl"),
+        train_pkl=str(CACHE_DIR / "wavecnn_dataset_train.pkl"),
+        test_pkl=str(CACHE_DIR / "wavecnn_dataset_test.pkl"),
         class_freqs_pt=str(CACHE_DIR / "class_freqs.pt"),
         model_out=str(CACHE_DIR / "wavecnn_model.pt"),
         emb_out=str(CACHE_DIR / "cnn_embeddings.parquet"),
         window=24,
         epochs=1,
         batch=256,
+        lr=3e-4,
     )
+
+    # train_wavecnn(
+    #     dataset_pkl=str(CACHE_DIR / "wavecnn_dataset.pkl"),
+    #     class_freqs_pt=str(CACHE_DIR / "class_freqs.pt"),
+    #     model_out=str(CACHE_DIR / "wavecnn_model.pt"),
+    #     emb_out=str(CACHE_DIR / "cnn_embeddings.parquet"),
+    #     window=24,
+    #     epochs=1,
+    #     batch=256,
+    # )
+
+    print("[MAIN] All steps completed successfully.")
+
+    exit()
 
     # ------------------------------------------------------------------ #
     # 4. GRU
