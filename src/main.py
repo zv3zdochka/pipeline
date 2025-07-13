@@ -28,7 +28,7 @@ CACHE_DIR = pathlib.Path("cache")
 CACHE_DIR = pathlib.Path(__file__).parent / "cache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-CSV_PATH = pathlib.Path(__file__).parent.parent / "data" / "XRPUSDT_merge_180d.csv"
+CSV_PATH = pathlib.Path(__file__).parent.parent / "data" / "XRPUSDT_merge_30d.csv"
 
 
 def main() -> None:
@@ -80,83 +80,89 @@ def main() -> None:
     print(f"[MICROTREND] Assigned microtrend labels: {len(dist)} unique labels")
     print(f"[MAIN] Saved dataset.csv, imputed_events.pkl, and microtrend_distribution.json in {CACHE_DIR}")
 
-    # Wavelet + 1D-CNN
-    print(f"[WAVECNN] Starting CNN dataset preparation")
-    df_train_cnn, df_test_cnn, scaler_raw, scaler_wave = prepare_1dcnn_df(
-        dataset,
-        wavelet="db4",
-        level=3,
-        window_size=48,
-        train_frac=0.8,
-        raw_scaler_path=CACHE_DIR / "scaler_raw.pkl",
-        wave_scaler_path=CACHE_DIR / "scaler_wave.pkl",
-        dataset_train_path=CACHE_DIR / "wavecnn_dataset_train.pkl",
-        dataset_test_path=CACHE_DIR / "wavecnn_dataset_test.pkl",
-        class_freq_path=CACHE_DIR / "class_freqs.pt",
-    )
-    print(f"[WAVECNN] Prepared datasets: "
-          f"{df_train_cnn.shape[0]} train samples, {df_test_cnn.shape[0]} test samples")
-    print(f"[WAVECNN] Saved raw scaler → {CACHE_DIR / 'scaler_raw.pkl'}, "
-          f"wavelet scaler → {CACHE_DIR / 'scaler_wave.pkl'}")
-    print(f"[WAVECNN] Saved datasets → "
-          f"{CACHE_DIR / 'wavecnn_dataset_train.pkl'} & {CACHE_DIR / 'wavecnn_dataset_test.pkl'}")
-    print(f"[WAVECNN] Class frequencies written to → {CACHE_DIR / 'class_freqs.pt'}")
-    print(f"[WAVECNN] START WAVECNN TRAINING")
-    train_wavecnn(
-        train_pkl=str(CACHE_DIR / "wavecnn_dataset_train.pkl"),
-        test_pkl=str(CACHE_DIR / "wavecnn_dataset_test.pkl"),
-        model_out=str(CACHE_DIR / "wavecnn_model.pt"),
-        emb_train_out=str(CACHE_DIR / "cnn_embeddings.parquet"),  # единый выход
-        emb_test_out=None,
-        window=48,
-        epochs=30,
-        batch=2048,
-        lr=1e-4,
-    )
+    # # Wavelet + 1D-CNN
+    # print(f"[WAVECNN] Starting CNN dataset preparation")
+    # df_train_cnn, df_test_cnn, scaler_raw, scaler_wave = prepare_1dcnn_df(
+    #     dataset,
+    #     wavelet="db4",
+    #     level=3,
+    #     window_size=48,
+    #     train_frac=0.8,
+    #     raw_scaler_path=CACHE_DIR / "scaler_raw.pkl",
+    #     wave_scaler_path=CACHE_DIR / "scaler_wave.pkl",
+    #     dataset_train_path=CACHE_DIR / "wavecnn_dataset_train.pkl",
+    #     dataset_test_path=CACHE_DIR / "wavecnn_dataset_test.pkl",
+    #     class_freq_path=CACHE_DIR / "class_freqs.pt",
+    # )
+    # print(f"[WAVECNN] Prepared datasets: "
+    #       f"{df_train_cnn.shape[0]} train samples, {df_test_cnn.shape[0]} test samples")
+    # print(f"[WAVECNN] Saved raw scaler → {CACHE_DIR / 'scaler_raw.pkl'}, "
+    #       f"wavelet scaler → {CACHE_DIR / 'scaler_wave.pkl'}")
+    # print(f"[WAVECNN] Saved datasets → "
+    #       f"{CACHE_DIR / 'wavecnn_dataset_train.pkl'} & {CACHE_DIR / 'wavecnn_dataset_test.pkl'}")
+    # print(f"[WAVECNN] Class frequencies written to → {CACHE_DIR / 'class_freqs.pt'}")
+    # print(f"[WAVECNN] START WAVECNN TRAINING")
+    # train_wavecnn(
+    #     train_pkl=str(CACHE_DIR / "wavecnn_dataset_train.pkl"),
+    #     test_pkl=str(CACHE_DIR / "wavecnn_dataset_test.pkl"),
+    #     model_out=str(CACHE_DIR / "wavecnn_model.pt"),
+    #     emb_train_out=str(CACHE_DIR / "cnn_embeddings.parquet"),  # единый выход
+    #     emb_test_out=None,
+    #     window=48,
+    #     epochs=30,
+    #     batch=256,
+    #     lr=1e-4,
+    # )
 
-    print("[GRU] Preparing GRU dataset")
-    prepare_gru_dataset(
-        events_pkl=CACHE_DIR / "imputed_events.pkl",
-        emb_path=CACHE_DIR / "cnn_embeddings.parquet",
-        seq_len=96,
-        train_frac=0.8,
-        scaler_path=CACHE_DIR / "scaler_gru.pkl",
-        dataset_train_path=CACHE_DIR / "gru_dataset_train.pkl",
-        dataset_test_path=CACHE_DIR / "gru_dataset_test.pkl"
-    )
+    # print("[GRU] Preparing GRU dataset")
+    # prepare_gru_dataset(
+    #     events_pkl=CACHE_DIR / "imputed_events.pkl",
+    #     emb_path=CACHE_DIR / "cnn_embeddings.parquet",
+    #     seq_len=96,
+    #     train_frac=0.8,
+    #     scaler_path=CACHE_DIR / "scaler_gru.pkl",
+    #     dataset_train_path=CACHE_DIR / "gru_dataset_train.pkl",
+    #     dataset_test_path=CACHE_DIR / "gru_dataset_test.pkl"
+    # )
 
-    print(f"[GRU] Saved GRU train/test datasets and scaler")
+    # print(f"[GRU] Saved GRU train/test datasets and scaler")
 
-    print("[GRU] Training GRU model")
-    train_gru(
-        train_pkl=CACHE_DIR / "gru_dataset_train.pkl",
-        test_pkl=CACHE_DIR / "gru_dataset_test.pkl",
-        class_freqs_pt=CACHE_DIR / "class_freqs.pt",       # не используется внутри
-        events_pkl=CACHE_DIR / "imputed_events.pkl",       # не используется внутри
-        emb_path=CACHE_DIR / "cnn_embeddings.parquet",     # не используется внутри
-        model_out=CACHE_DIR / "gru_model.pt",
-        emb_out=CACHE_DIR / "gru_embeddings.parquet",
-        seq_len=96,
-        epochs=10,
-        batch_size=1024,
-        lr=1e-3,
-        patience=2,
-    )
-    print("[GRU] Done")
-    exit()
+    # print("[GRU] Training GRU model")
+    # train_gru(
+    #     train_pkl=CACHE_DIR / "gru_dataset_train.pkl",
+    #     test_pkl=CACHE_DIR / "gru_dataset_test.pkl",
+    #     class_freqs_pt=CACHE_DIR / "class_freqs.pt",       # не используется внутри
+    #     events_pkl=CACHE_DIR / "imputed_events.pkl",       # не используется внутри
+    #     emb_path=CACHE_DIR / "cnn_embeddings.parquet",     # не используется внутри
+    #     model_out=CACHE_DIR / "gru_model.pt",
+    #     emb_out=CACHE_DIR / "gru_embeddings.parquet",
+    #     seq_len=96,
+    #     epochs=10,
+    #     batch_size=2048,
+    #     lr=1e-3,
+    #     patience=2,
+    # )
+    # print("[GRU] Done")
 
     print("[TIMESNET] DATA PREP STARTED")
 
+    # 3) Подготовка данных для TimesNet
+    print("[TIMESNET] DATA PREP STARTED")
     prepare_timesnet_dataset(
         df=dataset,
         seq_len=288,
         horizon=288,
+        target_col="microtrend_label",
+        shift_target=True,
         train_dataset_path=CACHE_DIR / "timesnet_train.pt",
         test_dataset_path=CACHE_DIR / "timesnet_test.pt",
         scaler_path=CACHE_DIR / "timesnet_scaler.pkl",
+        train_ratio=0.8,
+        strict=False,
     )
     print("[TIMESNET] DATA PREP COMPLETED")
 
+    # 4) Обучение TimesNet
     print("[TIMESNET] TRAINING STARTED")
     train_timesnet(
         train_pt=str(CACHE_DIR / "timesnet_train.pt"),
@@ -166,12 +172,14 @@ def main() -> None:
         embed_out=str(CACHE_DIR / "timesnet_embeddings.parquet"),
         forecast_out=str(CACHE_DIR / "timesnet_forecast.parquet"),
         seq_len=288,
-        epochs=5,
-        batch_size=512,
-        lr=3e-4,
+        epochs=25,
+        batch_size=256,
+        lr=1e-3,
+        device=None,
+        patience=6,
     )
     print(f"[TIMESNET] Training completed")
-
+    exit()
     print("[MAIN] All steps completed successfully.")
 
     print("[TFT] DATA PREP STARTED")
