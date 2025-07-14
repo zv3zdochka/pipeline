@@ -28,7 +28,7 @@ CACHE_DIR = pathlib.Path("cache")
 CACHE_DIR = pathlib.Path(__file__).parent / "cache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-CSV_PATH = pathlib.Path(__file__).parent.parent / "data" / "XRPUSDT_merge_30d.csv"
+CSV_PATH = pathlib.Path(__file__).parent.parent / "data" / "XRPUSDT_merge_180d.csv"
 
 
 def main() -> None:
@@ -140,27 +140,25 @@ def main() -> None:
     #     epochs=10,
     #     batch_size=2048,
     #     lr=1e-3,
-    #     patience=2,
+    #     patience=5,
     # )
     # print("[GRU] Done")
 
-    print("[TIMESNET] DATA PREP STARTED")
+    # print("[TIMESNET] DATA PREP STARTED")
 
     # 3) Подготовка данных для TimesNet
-    print("[TIMESNET] DATA PREP STARTED")
+    print("[TIMESNET] Preparing dataset")
     prepare_timesnet_dataset(
-        df=dataset,
-        seq_len=288,
-        horizon=288,
-        target_col="microtrend_label",
-        shift_target=True,
+        df=dataset,                           # тот же DataFrame с microtrend_label
+        seq_len=288,                          # окно ≈ 24 часа (5-мин свечи)
+        shift_target=False,                   # текущее окно → текущий label
+        train_ratio=0.8,
+        scaler_path=CACHE_DIR / "timesnet_scaler.pkl",
         train_dataset_path=CACHE_DIR / "timesnet_train.pt",
         test_dataset_path=CACHE_DIR / "timesnet_test.pt",
-        scaler_path=CACHE_DIR / "timesnet_scaler.pkl",
-        train_ratio=0.8,
-        strict=False,
     )
-    print("[TIMESNET] DATA PREP COMPLETED")
+    print("[TIMESNET] DATA PREP DONE")
+    exit()
 
     # 4) Обучение TimesNet
     print("[TIMESNET] TRAINING STARTED")
