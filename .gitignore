@@ -167,3 +167,4 @@ cython_debug/
 /src/cache/
 /glue.py
 /out.py
+/src.zip

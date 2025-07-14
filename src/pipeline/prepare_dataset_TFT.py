@@ -11,6 +11,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
 
 
 class TFTDataset(Dataset):
@@ -50,6 +51,7 @@ def prepare_tft_dataset(
         scaler_path: str | pathlib.Path = "tft_scaler.pkl",
         dataset_path: str | pathlib.Path = "tft_dataset.pt",
         train_size: float = 0.8,
+        random_state: int = 42,
         train_features_path: str | pathlib.Path = "tft_train_features.npy",
         train_targets_path: str | pathlib.Path = "tft_train_targets.npy",
         test_features_path: str | pathlib.Path = "tft_test_features.npy",
@@ -77,15 +79,12 @@ def prepare_tft_dataset(
     df_tn_emb  = _read_parquet_any(timesnet_emb_path).add_prefix("timesnet_emb_")
     df_tn_pred = _read_parquet_any(timesnet_pred_path)
 
-    print("[TFT] Joining dataframes...")
-    df_all = (
-        df_events
-        .join(df_cnn,    how="inner")
-        .join(df_gru,    how="inner")
-        .join(df_tn_emb, how="inner")
-        .join(df_tn_pred,how="inner")
-        .sort_index()
-    )
+    print("[TFT] Joining dataframes (left-join)...")
+    df_all = df_events.copy()
+    for extra in (df_cnn, df_gru, df_tn_emb, df_tn_pred):
+        df_all = df_all.join(extra, how="left")
+    df_all = df_all.fillna(0.0)
+
     if target_col not in df_all.columns:
         raise KeyError(f"target column '{target_col}' not found")
 
@@ -105,16 +104,23 @@ def prepare_tft_dataset(
             raise KeyError(msg)
         warnings.warn(msg)
 
-    print("[TFT] Splitting into train/test sets...")
-    n_total   = len(df_all)
-    split_idx = int(n_total * train_size)
-    # делаем явные копии, чтобы безопасно присваивать через .loc
-    df_train = df_all.iloc[:split_idx].copy()
-    df_test  = df_all.iloc[split_idx:].copy()
+    print("[TFT] Stratified train/test split...")
+    y_all = df_all[target_col].values
+    idx = np.arange(len(df_all))
+    idx_train, idx_test = train_test_split(
+        idx,
+        train_size=train_size,
+        stratify=y_all,
+        random_state=random_state,
+    )
+    df_train = df_all.iloc[idx_train].copy().sort_index()
+    df_test  = df_all.iloc[idx_test].copy().sort_index()
+
+    print("[TFT] Class balance (train):", df_train[target_col].value_counts().to_dict())
+    print("[TFT] Class balance (test) :", df_test[target_col].value_counts().to_dict())
 
     print("[TFT] Fitting scaler on train and transforming splits...")
     scaler = StandardScaler()
-    # теперь используем .loc — предупреждений не будет
     df_train.loc[:, continuous_cols] = scaler.fit_transform(df_train[continuous_cols].astype("float32"))
     df_test.loc[:,  continuous_cols] = scaler.transform(df_test[continuous_cols].astype("float32"))
     joblib.dump(scaler, scaler_path)
@@ -129,7 +135,7 @@ def prepare_tft_dataset(
     np.save(test_features_path,  df_test[feature_cols].values.astype("float32"))
     np.save(test_targets_path,   df_test[target_col].values.astype("float32"))
 
-    print("[TFT] Saving scaler and datasets...")
+    print("[TFT] Saving full dataset for inspection...")
     torch.save({
         "features": df_all[feature_cols].values.astype("float32"),
         "targets":  df_all[target_col].values.astype("float32"),
