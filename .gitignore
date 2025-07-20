@@ -168,3 +168,10 @@ cython_debug/
 /glue.py
 /out.py
 /src.zip
+/src/check.py
+/src/dataset_small.csv
+/src/inference.py
+/src/output.csv
+/src/output_res.csv
+/src/test_kelly_out.csv
+/src/test.py

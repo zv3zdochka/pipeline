@@ -18,6 +18,8 @@ from .train_TFT import train_tft
 
 from .train_PPO import train_ppo
 
+from src.inference import export_ppo_predictions
+
 __all__ = [
     "print_dataset_overview",
     "impute_missing",
@@ -35,4 +37,5 @@ __all__ = [
     "prepare_tft_dataset",
     "train_tft",
     "train_ppo",
+    "export_ppo_predictions"
 ]

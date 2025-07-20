@@ -18,7 +18,7 @@ EVENT_COLS = [
     "whale_position_positionValue",
     "whale_position_cumFunding",
     "liquidation_history_longTurnover",
-    "liquidation_history_shortTurnover"
+    "liquidation_history_shortTurnover",
 ]
 
 MISSING_COLS = [f"{c}_was_missing" for c in EVENT_COLS]
@@ -28,8 +28,11 @@ FEATURE_COLS = EVENT_COLS + MISSING_COLS
 
 class GRUSequenceDataset(Dataset):
     """
-    A PyTorch Dataset that provides fixed-length time series sequences
-    and their corresponding labels for GRU training or evaluation.
+    Provides fixed-length sliding window sequences and corresponding labels
+    for GRU training or evaluation.
+
+    Features are assumed to be in a 2D array ordered chronologically.
+    Label for a window is taken from the last timestep in that window.
     """
 
     def __init__(self, features: np.ndarray, labels: np.ndarray, seq_len: int):
@@ -47,34 +50,38 @@ class GRUSequenceDataset(Dataset):
 
 
 def prepare_gru_dataset(
-        events_pkl: str | pathlib.Path,
-        emb_path: str | pathlib.Path,
-        seq_len: int = 96,
-        train_frac: float = 0.8,
-        scaler_path: str | pathlib.Path | None = None,
-        dataset_train_path: str | pathlib.Path | None = None,
-        dataset_test_path: str | pathlib.Path | None = None
+    events_pkl: str | pathlib.Path,
+    emb_path: str | pathlib.Path,
+    seq_len: int = 96,
+    train_frac: float = 0.8,
+    scaler_path: str | pathlib.Path | None = None,
+    dataset_train_path: str | pathlib.Path | None = None,
+    dataset_test_path: str | pathlib.Path | None = None,
 ):
     """
-    Load event data and CNN embeddings, split chronologically into train and test sets,
-    fit a StandardScaler on the training features, transform both sets, build
-    GRUSequenceDataset instances, and optionally save scaler and datasets.
+    Load event data and CNN embeddings, align them, split chronologically into
+    train and test sets, fit a StandardScaler on training features, and build
+    GRUSequenceDataset instances.
 
-    Returns
-    -------
-    train_dataset : GRUSequenceDataset
-        Dataset for training.
-    test_dataset : GRUSequenceDataset
-        Dataset for testing.
-    scaler : StandardScaler
-        Fitted scaler on training data.
+    Args:
+        events_pkl: Path to serialized events (joblib).
+        emb_path: Path to embeddings file (parquet or CSV).
+        seq_len: Sequence length for GRU windows.
+        train_frac: Fraction of samples (chronological) used for training.
+        scaler_path: Optional path to save fitted scaler.
+        dataset_train_path: Optional path to save the training dataset object.
+        dataset_test_path: Optional path to save the test dataset object.
+
+    Returns:
+        train_dataset: GRUSequenceDataset for training.
+        test_dataset: GRUSequenceDataset for testing.
+        scaler: Fitted StandardScaler instance.
     """
     print(f"[GRU] Loading events from {events_pkl}")
     events = joblib.load(events_pkl)
     events = events.set_index("ts").sort_index()
     print(f"[GRU] Events loaded, total records: {len(events)}")
 
-    # Ensure all columns exist
     for c in EVENT_COLS:
         if c not in events.columns:
             events[c] = 0.0
@@ -111,12 +118,12 @@ def prepare_gru_dataset(
 
     if scaler_path:
         joblib.dump(scaler, scaler_path)
-
         print(f"[GRU] Saved scaler to {scaler_path}")
 
     X_train = scaler.transform(df_train[feature_columns].values)
     X_test = scaler.transform(df_test[feature_columns].values)
 
+    # Shift labels to be 0,1,2 if original were -1,0,1
     y_train = (df_train["microtrend_label"] + 1).astype("int64").values
     y_test = (df_test["microtrend_label"] + 1).astype("int64").values
 

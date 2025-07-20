@@ -1,19 +1,8 @@
-"""
-TimesNet-Mini ─ компактная архитектура для 3-классовой классификации
-мультивариативного тайм-ряда. Главные отличия от “полной” версии:
-
-* d_model = 64 (вместо 128);
-* всего 3 TimesBlock;
-* **без** Multi-Head Attention → вместо него Global Average Pooling;
-* ~6 М параметров и существенно ниже VRAM.
-"""
-
 from __future__ import annotations
 import torch
 import torch.nn as nn
 
 
-# ---------------------- building blocks ------------------------------- #
 class Time2Vec(nn.Module):
     def __init__(self, out_dim: int):
         super().__init__()
@@ -52,21 +41,29 @@ class TimesBlock(nn.Module):
         self.norm = nn.LayerNorm(d_model)
 
     def forward(self, x):
-        y = x.transpose(1, 2)                    # (B,D,L)
+        y = x.transpose(1, 2)
         outs = []
         for conv in self.convs:
             z = conv(y)
             z, g = z.chunk(2, dim=1)
             z = z * torch.sigmoid(g)
             outs.append(z)
-        y = torch.cat(outs, dim=1)               # (B,N*D,L)
-        y = self.proj(y).transpose(1, 2)         # (B,L,D)
+        y = torch.cat(outs, dim=1)
+        y = self.proj(y).transpose(1, 2)
         y = self.dropout(y) * self.scale
         return self.norm(x + y)
 
 
-# --------------------------- model ------------------------------------ #
 class TimesNetModel(nn.Module):
+    """
+    TimesNet-Mini: compact architecture for 3-class classification of a multivariate time series.
+    Main differences from the full version:
+      * d_model = 64 instead of 128
+      * only 3 TimesBlocks
+      * no Multi-Head Attention (replaced by global average pooling)
+      * ~6M parameters and significantly lower VRAM usage.
+    """
+
     def __init__(
         self,
         seq_len: int,
@@ -87,7 +84,6 @@ class TimesNetModel(nn.Module):
             *[TimesBlock(d_model, p_drop=0.05) for _ in range(n_blocks)]
         )
 
-        # вместо self-attention ― global average pooling
         self.pool = nn.AdaptiveAvgPool1d(1)
 
         self.head = nn.Sequential(
@@ -97,7 +93,11 @@ class TimesNetModel(nn.Module):
 
     def forward(self, x):
         """
-        x : (B, L, F)
+        Args:
+            x: (B, L, F)
+        Returns:
+            logits: (B, num_classes)
+            emb: (B, d_model)
         """
         B, L, _ = x.shape
         if L != self.seq_len:
@@ -112,8 +112,8 @@ class TimesNetModel(nn.Module):
 
         x = torch.cat([x, self.time2vec(t_frac)], dim=-1)
         x = self.proj_in(x)
-        x = self.blocks(x)                       # (B,L,D)
+        x = self.blocks(x)
 
-        emb = self.pool(x.transpose(1, 2)).squeeze(-1)  # (B,D)
-        logits = self.head(emb)                  # (B,3)
+        emb = self.pool(x.transpose(1, 2)).squeeze(-1)
+        logits = self.head(emb)
         return logits, emb

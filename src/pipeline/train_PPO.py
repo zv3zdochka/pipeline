@@ -1,318 +1,197 @@
-"""
-train_ppo.py
-
-Enhanced PPO agent for *real‑exchange* crypto trading.
-=====================================================
-Key improvements vs. first draft
---------------------------------
-1. **Realistic micro‑structure costs** – commission & slippage deducted on every entry/exit.
-2. **Trend‑aware reward shaping** – incentivises catching trends of 3‑100 candles (defaults 3‑15).
-3. **Observation normalisation** – `StandardScaler` on TFT embeddings for faster, stabler learning.
-4. **Better PPO hyper‑params** – tuned for discrete 5‑action space & sparse rewards.
-5. **Evaluation callback** – early‑stopping on Sharpe‑like metric over validation split.
-6. **Clean API remains**: `train_ppo()` + `get_action()` unchanged for callers.
-
-Dependencies
-------------
-```bash
-pip install stable-baselines3==2.2.1 torch gym numpy scikit-learn
-```
-
-"""
+# src/pipeline/train_PPO.py
 from __future__ import annotations
-
-import numpy as np
-import gym
+import os, pathlib, numpy as np, pandas as pd, gym, torch
 from gym import spaces
-import torch as th
+from typing import Tuple, Union
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv
-from stable_baselines3.common.callbacks import EvalCallback, StopTrainingOnNoModelImprovement
-from sklearn.preprocessing import StandardScaler
-from typing import Tuple, Dict, List
+from stable_baselines3.common.vec_env import SubprocVecEnv
+from stable_baselines3.common.callbacks import EvalCallback
+from stable_baselines3.common.evaluation import evaluate_policy
 
-# ──────────────────────────────────────────
-# Environment
-# ──────────────────────────────────────────
+# ----------------------------- Hyperparameters ----------------------------- #
+_N_ENVS       = int(os.getenv("PPO_N_ENVS", 6))        # parallel environments
+_BATCH        = int(os.getenv("PPO_BATCH", 4096))      # PPO minibatch size
+_N_STEPS      = int(os.getenv("PPO_N_STEPS", 2048))    # rollout length per env
+_REWARD_K     = 1_000.0                                # reward scale factor
+_HOLD_PENALTY = 0.001                                  # penalty per idle step
+_CLOSE_BONUS  = 0.01                                   # bonus for successful exit
+_MAX_EPISODE  = 1_000                                  # max steps per episode
+_EPS          = 1e-6                                   # numerical epsilon
+# --------------------------------------------------------------------------- #
+
+
+def _sanitize(x: np.ndarray) -> np.ndarray:
+    """Replace NaN / Inf with 0 and cast to float32."""
+    return np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+
+
+def _embeddings(path: Union[str, pathlib.Path]) -> np.ndarray:
+    df = pd.read_parquet(path)
+    return _sanitize(
+        np.vstack(df["embedding"].values)
+        if "embedding" in df.columns
+        else df.to_numpy()
+    )
+
+
+def _prices(path: Union[str, pathlib.Path], col: str) -> np.ndarray:
+    pr = _sanitize(pd.read_csv(path, usecols=[col])[col].to_numpy())
+    bad = pr <= 0
+    if bad.any():  # simple forward fill fallback + epsilon
+        pr[bad] = np.maximum.accumulate(pr)[bad] + 1e-3
+    return pr
 
 
 class TradingEnv(gym.Env):
-    """Trend‑aware trading environment for PPO.
-
-    Parameters
-    ----------
-    embeddings : np.ndarray, (T, D)
-        TFT contextual embeddings.
-    prices : np.ndarray, (T,)
-        Reference close price per candle.
-    commission_perc : float, default 2e‑4 (0.02 %)
-        One‑side commission percentage *per* trade side.
-    slippage_perc : float, default 1e‑4 (0.01 %)
-        Expected adverse price movement when filling.
-    min_trend : int, default 3
-        Minimum candles a trend is expected to last.
-    max_trend : int, default 100
-        Upper bound for trend duration (avoids blind holding forever).
-    max_steps : int | None
-        Cap episode length; default = len(embeddings) ‑ 2.
     """
+    Discrete trading environment.
 
-    metadata = {"render.modes": ["human"]}
+    Actions:
+        0: Open Long
+        1: Open Short
+        2: Close Long
+        3: Close Short
+        4: Hold
+    """
+    metadata = {"render.modes": []}
 
-    ACTIONS: List[str] = [
-        "Take Long",
-        "Take Short",
-        "Exit Long",
-        "Exit Short",
-        "Hold",
-    ]
-
-    def __init__(
-        self,
-        embeddings: np.ndarray,
-        prices: np.ndarray,
-        *,
-        commission_perc: float = 2e-4,
-        slippage_perc: float = 1e-4,
-        min_trend: int = 3,
-        max_trend: int = 100,
-        max_steps: int | None = None,
-    ):
+    def __init__(self, emb: np.ndarray, pr: np.ndarray):
         super().__init__()
-
-        assert len(embeddings) == len(prices), "Embeddings and prices length mismatch"
-        self.raw_embeddings = embeddings.astype(np.float32)
-        self.prices = prices.astype(np.float32)
-        self.T, self.embedding_dim = self.raw_embeddings.shape
-
-        # Normalise observations (fit once)
-        self.scaler = StandardScaler().fit(self.raw_embeddings)
-        self.embeddings = self.scaler.transform(self.raw_embeddings).astype(np.float32)
-
-        self.commission = commission_perc
-        self.slippage = slippage_perc
-        self.min_trend = min_trend
-        self.max_trend = max_trend
-        self.max_steps = (max_steps or self.T - 2)  # leave look‑ahead 1 candle
-
-        # Gym spaces
+        assert len(emb) == len(pr)
+        self.emb, self.pr = emb, pr
+        self.action_space = spaces.Discrete(5)
         self.observation_space = spaces.Box(
-            low=-5.0, high=5.0, shape=(self.embedding_dim,), dtype=np.float32
+            -np.inf, np.inf, shape=(emb.shape[1],), dtype=np.float32
         )
-        self.action_space = spaces.Discrete(len(self.ACTIONS))
+        self.reset()
 
-        # Internal state vars
-        self.current_step: int = 0
-        self.position: int = 0      # 1 long, -1 short, 0 flat
-        self.entry_price: float = 0
-        self.hold_duration: int = 0 # candles in current position
-
-    # ────────────── Core API ──────────────
-
-    def reset(self, *, seed: int | None = None, **kwargs):
+    def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
-        self.current_step = 0
-        self.position = 0
-        self.entry_price = 0.0
-        self.hold_duration = 0
-        return self._get_obs(), {}
+        self.i = 0        # absolute index
+        self.t = 0        # index within current episode
+        self.pos = 0      # 1 long, -1 short, 0 flat
+        self.entry = 0.0
+        return self.emb[self.i], {}
 
     def step(self, action: int):
-        done = False
-        truncated = False
+        p_now = float(max(self.pr[self.i], _EPS))
+        p_next = float(max(self.pr[self.i + 1], _EPS))
+        r = 0.0
 
-        price_now = self.prices[self.current_step]
-        price_next = self.prices[self.current_step + 1]
+        # actions
+        if action == 0 and self.pos == 0:          # open long
+            self.pos, self.entry = 1, p_now
+        elif action == 1 and self.pos == 0:        # open short
+            self.pos, self.entry = -1, p_now
+        elif action == 2 and self.pos == 1:        # close long
+            r += (p_now - self.entry) / self.entry + _CLOSE_BONUS
+            self.pos, self.entry = 0, 0.0
+        elif action == 3 and self.pos == -1:       # close short
+            r += (self.entry - p_now) / self.entry + _CLOSE_BONUS
+            self.pos, self.entry = 0, 0.0
 
-        reward = 0.0
-        trade_executed = False
+        # mark-to-market
+        if self.pos == 1:
+            r += (p_next - p_now) / p_now
+        elif self.pos == -1:
+            r += (p_now - p_next) / p_now
 
-        # ─── Action logic ───────────────────
-        if action == 0:  # Take Long
-            if self.position != 1:
-                reward -= self._trade_cost(price_now)
-                self.position = 1
-                self.entry_price = price_now
-                self.hold_duration = 0
-                trade_executed = True
-        elif action == 1:  # Take Short
-            if self.position != -1:
-                reward -= self._trade_cost(price_now)
-                self.position = -1
-                self.entry_price = price_now
-                self.hold_duration = 0
-                trade_executed = True
-        elif action == 2 and self.position == 1:  # Exit Long
-            reward += self._realised_pnl(price_now)
-            reward -= self._trade_cost(price_now)
-            self.position = 0
-            self.hold_duration = 0
-            trade_executed = True
-        elif action == 3 and self.position == -1:  # Exit Short
-            reward += self._realised_pnl(price_now)
-            reward -= self._trade_cost(price_now)
-            self.position = 0
-            self.hold_duration = 0
-            trade_executed = True
-        elif action == 4:  # Hold
-            pass
+        # idle penalty
+        if self.pos == 0:
+            r -= _HOLD_PENALTY
 
-        # Unrealised PnL every step while in position
-        reward += self._unrealised_pnl(price_now, price_next)
+        # scale reward
+        r *= _REWARD_K
 
-        # Trend‑aware holding bonus / penalty
-        if self.position != 0:
-            self.hold_duration += 1
-            if self.hold_duration < self.min_trend:
-                reward -= 0.01  # discourage premature exit
-            elif self.hold_duration > self.max_trend:
-                reward -= 0.02  # penalty for over‑holding dead positions
-
-        # Advance time
-        self.current_step += 1
-        if self.current_step >= self.max_steps:
-            done = True
-
-        obs = self._get_obs()
-        info = {
-            "step": self.current_step,
-            "position": self.position,
-            "hold_duration": self.hold_duration,
-            "trade": trade_executed,
-        }
-        return obs, float(reward), done, truncated, info
-
-    # ────────────── Helpers ──────────────
-
-    def _get_obs(self) -> np.ndarray:  # returns normalised embedding
-        return self.embeddings[self.current_step]
-
-    def _trade_cost(self, price: float) -> float:
-        # Commission both sides (entry/exit) + slippage when trade executes
-        return (self.commission * 2 + self.slippage) * 100.0
-
-    def _unrealised_pnl(self, price_now: float, price_next: float) -> float:
-        if self.position == 0:
-            return 0.0
-        direction = 1.0 if self.position == 1 else -1.0
-        pct = (price_next - price_now) / price_now * direction
-        return pct * 100.0
-
-    def _realised_pnl(self, price_exit: float) -> float:
-        if self.position == 0:
-            return 0.0
-        direction = 1.0 if self.position == 1 else -1.0
-        pct = (price_exit - self.entry_price) / self.entry_price * direction
-        return pct * 100.0
-
-    # ────────────── Render ──────────────
-
-    def render(self):
-        print(
-            f"Step {self.current_step:>6} | Pos {self.position:+d} | Hold {self.hold_duration:>3} | "
-            f"Price {self.prices[self.current_step]:.2f}"
-        )
-
-    def close(self):
-        pass
+        # advance
+        self.i += 1
+        self.t += 1
+        done = self.i >= len(self.pr) - 1 or self.t >= _MAX_EPISODE
+        return self.emb[self.i], float(r), done, False, {}
 
 
-# ──────────────────────────────────────────
-# Training wrapper with validation split
-# ──────────────────────────────────────────
+def _vec_env(emb: np.ndarray, pr: np.ndarray, n: int) -> SubprocVecEnv:
+    def _factory():
+        return TradingEnv(emb, pr)
+    start = "fork" if os.name == "posix" else "spawn"
+    return SubprocVecEnv([_factory] * n, start_method=start)
+
 
 def train_ppo(
-    embeddings: np.ndarray,
-    prices: np.ndarray,
+    emb_path: str | pathlib.Path,
+    csv_path: str | pathlib.Path,
+    price_col: str,
     *,
-    policy_kwargs: dict | None = None,
-    total_timesteps: int = 2_000_000,
-    learning_rate: float = 2.5e-4,
-    device: str = "auto",
-    verbose: int = 1,
-    eval_fraction: float = 0.2,
-) -> PPO:
-    """Train PPO with early stopping on validation Sharpe‑like metric."""
+    model_out: str | pathlib.Path = "ppo_trading_best.zip",
+    total_timesteps: int = 1_000_000,
+) -> Tuple[float, float]:
+    """
+    Train a PPO agent on the trading environment and return (avg_reward, win_rate)
+    evaluated on a hold-out split.
 
-    assert 0 < eval_fraction < 0.5, "eval_fraction should be (0,0.5)"
-    split = int(len(embeddings) * (1 - eval_fraction))
-    train_emb, val_emb = embeddings[:split], embeddings[split:]
-    train_prc, val_prc = prices[:split], prices[split:]
+    Args:
+        emb_path: Path to parquet file with embeddings (rows aligned with prices).
+        csv_path: Path to CSV containing price column.
+        price_col: Name of price column in CSV.
+        model_out: Output path for the best model (.zip).
+        total_timesteps: Total training timesteps.
 
-    env = DummyVecEnv([lambda: TradingEnv(train_emb, train_prc)])
-    eval_env = DummyVecEnv([lambda: TradingEnv(val_emb, val_prc)])
+    Returns:
+        avg_reward: Mean episode reward on evaluation.
+        win_rate: Fraction of evaluation episodes with positive reward.
+    """
+    emb = _embeddings(emb_path)
+    pr = _prices(csv_path, price_col)
+    if len(emb) != len(pr):
+        m = min(len(emb), len(pr))
+        print(f"[WARN] truncate → {m}")
+        emb, pr = emb[:m], pr[:m]
 
-    if policy_kwargs is None:
-        policy_kwargs = dict(net_arch=[512, 256, 128], activation_fn=th.nn.Tanh)
+    split = int(len(pr) * 0.8)
+    train_env = _vec_env(emb[:split], pr[:split], _N_ENVS)
+    eval_env = _vec_env(emb[split:], pr[split:], _N_ENVS)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(
+        f"[PPO] device={device}  envs={_N_ENVS}  steps={_N_STEPS}  "
+        f"batch={_BATCH}  total={total_timesteps:,}"
+    )
 
     model = PPO(
-        policy="MlpPolicy",
-        env=env,
-        policy_kwargs=policy_kwargs,
-        learning_rate=learning_rate,
-        n_steps=2048,
-        batch_size=4096,
-        ent_coef=0.005,
-        clip_range=0.2,
-        gae_lambda=0.95,
-        gamma=0.997,
-        max_grad_norm=0.5,
-        vf_coef=0.4,
-        target_kl=0.03,
-        verbose=verbose,
+        "MlpPolicy",
+        train_env,
+        learning_rate=3e-4,
+        batch_size=_BATCH,
+        n_steps=_N_STEPS,
+        gamma=0.99,
+        gae_lambda=0.90,
+        ent_coef=0.02,
+        clip_range=0.30,
+        policy_kwargs=dict(net_arch=[512, 512, 256]),
         device=device,
+        verbose=0,
     )
 
-    stop_cb = StopTrainingOnNoModelImprovement(max_no_improvement_evals=5, min_evals=10, verbose=verbose)
-    eval_cb = EvalCallback(
+    cb = EvalCallback(
         eval_env,
-        eval_freq=25_000,
-        best_model_save_path=None,
+        eval_freq=10_000,
+        best_model_save_path=str(pathlib.Path(model_out).parent),
+        n_eval_episodes=10,
         deterministic=True,
-        render=False,
-        callback_after_eval=stop_cb,
     )
 
-    model.learn(total_timesteps=total_timesteps, callback=eval_cb)
-    return model
+    print("[PPO] training …")
+    model.learn(total_timesteps=total_timesteps, progress_bar=True, callback=cb)
 
+    best = pathlib.Path(model_out).parent / "best_model.zip"
+    (best if best.exists() else pathlib.Path(model_out)).rename(model_out)
+    model = PPO.load(model_out, env=eval_env, device=device)
 
-# ──────────────────────────────────────────
-# Inference helper (unchanged API)
-# ──────────────────────────────────────────
+    mean_r, _ = evaluate_policy(model, eval_env, 20, deterministic=True)
+    ep_r, _ = evaluate_policy(
+        model, eval_env, 20, deterministic=True, return_episode_rewards=True
+    )
+    win_rate = float((np.array(ep_r) > 0).mean())
+    print(f"[RESULT] avg_reward={mean_r:.3f} | win_rate={win_rate:.1%}")
 
-def get_action(
-    model: PPO,
-    observation: np.ndarray,
-    deterministic: bool = False,
-) -> Tuple[str, Dict[str, float]]:
-    """Return human‑readable action and confidences."""
-    obs = th.as_tensor(observation, dtype=th.float32).unsqueeze(0).to(model.device)
-    with th.no_grad():
-        dist = model.policy.get_distribution(obs)
-        probs = th.softmax(dist.distribution.logits, dim=-1).cpu().numpy().flatten()
-
-    actions = TradingEnv.ACTIONS
-    if deterministic:
-        idx = int(np.argmax(probs))
-    else:
-        idx = int(np.random.choice(len(actions), p=probs))
-
-    return actions[idx], {a: float(p) for a, p in zip(actions, probs)}
-
-
-# ──────────────────────────────────────────
-# Smoke test
-# ──────────────────────────────────────────
-if __name__ == "__main__":
-    T, D = 20_000, 64
-    np.random.seed(42)
-    dummy_emb = np.random.randn(T, D).astype(np.float32)
-    dummy_price = 50_000 + np.cumsum(np.random.randn(T)).astype(np.float32)
-
-    model = train_ppo(dummy_emb, dummy_price, total_timesteps=50_000, verbose=0)
-    act, conf = get_action(model, dummy_emb[-1], deterministic=True)
-    print("Action:", act)
-    print("Confidences:")
-    for k, v in conf.items():
-        print(f"  {k:11s}: {v:.3f}")
+    return float(mean_r), win_rate

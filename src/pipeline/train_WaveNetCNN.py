@@ -13,9 +13,13 @@ from .models.WaveNetCNN import WaveCNN
 
 
 # ---------- losses ---------------------------------------------------- #
-def focal_loss(logits: torch.Tensor, target: torch.Tensor, *,
-               gamma: float = 2.0,
-               alpha: list[float] | tuple[float, ...] | None = None) -> torch.Tensor:
+def focal_loss(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    *,
+    gamma: float = 2.0,
+    alpha: list[float] | tuple[float, ...] | None = None
+) -> torch.Tensor:
     if alpha is None:
         alpha = [1.0] * logits.size(1)
     ce = cross_entropy(logits, target, reduction="none")
@@ -25,10 +29,12 @@ def focal_loss(logits: torch.Tensor, target: torch.Tensor, *,
 
 
 # ---------- helpers --------------------------------------------------- #
-def _save_embeddings(mat: np.ndarray,
-                     df_ref: pd.DataFrame,
-                     window: int,
-                     path: str | pathlib.Path):
+def _save_embeddings(
+    mat: np.ndarray,
+    df_ref: pd.DataFrame,
+    window: int,
+    path: str | pathlib.Path
+):
     """mat.shape[0] == len(df_ref) - window + 1"""
     try:
         idx = df_ref.index[window - 1: window - 1 + len(mat)]
@@ -36,24 +42,26 @@ def _save_embeddings(mat: np.ndarray,
             raise ValueError
     except Exception:
         idx = pd.RangeIndex(len(mat))
-        warnings.warn("Не удалось выровнять индексы – использую RangeIndex")
+        warnings.warn("Failed to align indices – using RangeIndex")
     out = pd.DataFrame(mat, index=idx)
     out.to_parquet(path)
 
 
 # ---------- train ----------------------------------------------------- #
-def train_wavecnn(*,
-                  train_pkl: str | pathlib.Path,
-                  test_pkl: str | pathlib.Path,
-                  model_out: str | pathlib.Path,
-                  emb_train_out: str | pathlib.Path | None = None,
-                  emb_test_out: str | pathlib.Path,
-                  window: int = 48,
-                  epochs: int = 30,
-                  batch: int = 256,
-                  lr: float = 1e-4,
-                  log_dir: str | pathlib.Path | None = None,
-                  device: str | None = None):
+def train_wavecnn(
+    *,
+    train_pkl: str | pathlib.Path,
+    test_pkl: str | pathlib.Path,
+    model_out: str | pathlib.Path,
+    emb_train_out: str | pathlib.Path | None = None,
+    emb_test_out: str | pathlib.Path,
+    window: int = 48,
+    epochs: int = 30,
+    batch: int = 256,
+    lr: float = 1e-4,
+    log_dir: str | pathlib.Path | None = None,
+    device: str | None = None
+):
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[WAVECNN] device → {device}")
 
@@ -69,10 +77,20 @@ def train_wavecnn(*,
     alpha = (freq.max() / np.clip(freq, 1, None)).tolist()
     print(f"[WAVECNN] focal alpha → {alpha}")
 
-    train_ld = DataLoader(train_ds, batch_size=batch, shuffle=True, num_workers=2,
-                          pin_memory=torch.cuda.is_available())
-    test_ld = DataLoader(test_ds, batch_size=batch, shuffle=False, num_workers=2,
-                         pin_memory=torch.cuda.is_available())
+    train_ld = DataLoader(
+        train_ds,
+        batch_size=batch,
+        shuffle=True,
+        num_workers=2,
+        pin_memory=torch.cuda.is_available()
+    )
+    test_ld = DataLoader(
+        test_ds,
+        batch_size=batch,
+        shuffle=False,
+        num_workers=2,
+        pin_memory=torch.cuda.is_available()
+    )
 
     # ---------------- model ---------------- #
     model = WaveCNN(in_channels=train_df.shape[1] - 1, window_size=window).to(device)
@@ -83,7 +101,10 @@ def train_wavecnn(*,
     warm = max(1, int(epochs * 0.05))
     scheduler = SequentialLR(
         optim,
-        [LinearLR(optim, 0.01, 1.0, warm), CosineAnnealingLR(optim, epochs - warm, 1e-6)],
+        [
+            LinearLR(optim, 0.01, 1.0, warm),
+            CosineAnnealingLR(optim, epochs - warm, 1e-6)
+        ],
         [warm]
     )
 
@@ -95,30 +116,30 @@ def train_wavecnn(*,
     best_f1, no_imp, patience = 0., 0, 3
     for ep in range(1, epochs + 1):
         # ---- train
-        model.train();
+        model.train()
         run_loss = 0.
         for xb, yb in train_ld:
-            xb = xb.to(device);
-            yb = (yb + 1).to(device)
+            xb = xb.to(device)
+            yb = (yb + 1).to(device)  # shift labels to {0,1,2}
             optim.zero_grad(set_to_none=True)
             logits, _ = model(xb)
-            loss = loss_fn(logits, yb);
+            loss = loss_fn(logits, yb)
             loss.backward()
-            clip_grad_norm_(model.parameters(), 1.0);
+            clip_grad_norm_(model.parameters(), 1.0)
             optim.step()
             run_loss += loss.item() * xb.size(0)
         scheduler.step()
 
-        # ---- val
-        model.eval();
-        acc_m.reset();
+        # ---- validation
+        model.eval()
+        acc_m.reset()
         f1_m.reset()
         with torch.no_grad():
             for xb, yb in test_ld:
-                xb = xb.to(device);
+                xb = xb.to(device)
                 yb = (yb + 1).to(device)
                 preds = model(xb)[0].argmax(1)
-                acc_m.update(preds, yb);
+                acc_m.update(preds, yb)
                 f1_m.update(preds, yb)
         tr_loss = run_loss / len(train_ds)
         acc, f1 = acc_m.compute().item(), f1_m.compute().item()
@@ -130,11 +151,11 @@ def train_wavecnn(*,
         if f1 > best_f1:
             best_f1, no_imp = f1, 0
             torch.save(model.state_dict(), model_out)
-            print(f"  ↳ new best F1={best_f1:.3f}  (model saved)")
+            print(f"  ↳ new best F1={best_f1:.3f} (model saved)")
         else:
             no_imp += 1
             if no_imp >= patience:
-                print("  ↳ early-stopping");
+                print("  ↳ early-stopping")
                 break
     writer.close()
     print(f"[WAVECNN] best F1 = {best_f1:.3f}")
@@ -146,11 +167,12 @@ def train_wavecnn(*,
         ("train", train_ld, train_df, emb_train_out),
         ("test", test_ld, test_df, emb_test_out)
     ]:
-        if path is None: continue
+        if path is None:
+            continue
         embs = []
         with torch.no_grad():
             for xb, _ in loader:
-                xb = xb.to(device);
+                xb = xb.to(device)
                 embs.append(model(xb)[1].cpu())
         _save_embeddings(torch.cat(embs).numpy(), df_ref, window, path)
         print(f"[WAVECNN] {name} embeddings → {path}")

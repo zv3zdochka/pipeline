@@ -27,7 +27,6 @@ def prepare_1dcnn_df(
     dataset_test_path: Path = Path("wavecnn_dataset_test.pkl"),
     class_freq_path: Path = Path("class_freqs.pt"),
 ) -> Tuple[pd.DataFrame, pd.DataFrame, StandardScaler, StandardScaler]:
-
     if "ts" not in df.columns:
         raise ValueError("'ts' column required")
 
@@ -37,7 +36,7 @@ def prepare_1dcnn_df(
         "ohlcv_5m_open", "ohlcv_5m_high", "ohlcv_5m_low", "ohlcv_5m_close",
         "ohlcv_5m_vol",
         "open_interest_kline_open", "open_interest_kline_high",
-        "open_interest_kline_low",  "open_interest_kline_close",
+        "open_interest_kline_low", "open_interest_kline_close",
         "longshort_global_ratio", "longshort_top_account_ratio",
         "longshort_top_position_ratio",
     ]
@@ -80,10 +79,10 @@ def prepare_1dcnn_df(
 
     train_df, test_df = df_out.iloc[:split], df_out.iloc[split:]
 
-    joblib.dump(scaler_raw,  raw_scaler_path)
+    joblib.dump(scaler_raw, raw_scaler_path)
     joblib.dump(scaler_wave, wave_scaler_path)
     joblib.dump(train_df, dataset_train_path)
-    joblib.dump(test_df,  dataset_test_path)
+    joblib.dump(test_df, dataset_test_path)
 
     if "microtrend_label" in train_df.columns:
         freqs = train_df["microtrend_label"].value_counts().to_dict()
@@ -103,7 +102,7 @@ class CNNWindowDataset(Dataset):
         return len(self.X) - self.window + 1
 
     def __getitem__(self, idx):
-        x = torch.from_numpy(self.X[idx : idx + self.window].T)
+        x = torch.from_numpy(self.X[idx: idx + self.window].T)
         if self.has_label:
             y = int(self.y[idx + self.window - 1])
             return x, torch.tensor(y, dtype=torch.long)

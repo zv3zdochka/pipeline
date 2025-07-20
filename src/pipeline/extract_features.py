@@ -38,7 +38,7 @@ def _rsi(series: pd.Series, period: int = 14) -> pd.Series:
 
 def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Build multi-timeframe features for 5m/15m/30m/60m, cross-TF ratios,
+    Build multi-timeframe features for 5m/15m/30m/60m, cross-timeframe ratios,
     missing-value flags, category codes, and fill gaps.
 
     Args:
@@ -135,16 +135,31 @@ def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
     return df_merged.reset_index()
 
 
-import pandas as pd
-
-
 def label_microtrend(
-        df: pd.DataFrame,
-        price_col: str = 'ohlcv_5m_close',
-        min_candles: int = 3,
-        profit_thr: float = 0.03,
-        stop_loss_thr: float = 0.02
+    df: pd.DataFrame,
+    price_col: str = 'ohlcv_5m_close',
+    min_candles: int = 3,
+    profit_thr: float = 0.03,
+    stop_loss_thr: float = 0.02
 ) -> pd.Series:
+    """
+    Generate microtrend labels for each timestep based on future price path.
+
+    A label is:
+        +1 if price reaches profit_thr without prior drawdown beyond stop_loss_thr,
+        -1 if price drops below -profit_thr without prior run-up beyond stop_loss_thr,
+         0 otherwise.
+
+    Args:
+        df: DataFrame containing the price column.
+        price_col: Name of the price column.
+        min_candles: Minimum lookahead length to consider a valid trend.
+        profit_thr: Take-profit threshold (fractional return).
+        stop_loss_thr: Stop-loss threshold (fractional drawdown).
+
+    Returns:
+        pd.Series of int8 labels in {-1, 0, 1}.
+    """
     close = df[price_col].values
     n = len(close)
     labels = pd.Series(0, index=df.index, dtype='int8')

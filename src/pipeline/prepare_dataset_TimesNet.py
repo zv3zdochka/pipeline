@@ -13,11 +13,8 @@ from sklearn.preprocessing import StandardScaler
 from torch.utils.data import Dataset
 
 
-# --------------------------------------------------------------------------- #
-#                              DATASET-ОБЁРТКА                                #
-# --------------------------------------------------------------------------- #
 class TimesNetDataset(Dataset):
-    """Ленивая обёртка: возвращает (окно, метка)."""
+    """Lazy dataset wrapper: returns (window, label)."""
 
     def __init__(self, X: np.ndarray, y: np.ndarray, seq_len: int):
         assert X.ndim == 2 and len(X) == len(y)
@@ -31,19 +28,15 @@ class TimesNetDataset(Dataset):
     def __getitem__(self, idx: int):
         j = idx + self.seq_len
         return (
-            torch.from_numpy(self.X[idx:j]).float(),      # (seq_len, F)
-            torch.tensor(int(self.y[j])).long(),          # scalar
+            torch.from_numpy(self.X[idx:j]).float(),
+            torch.tensor(int(self.y[j])).long(),
         )
 
 
-# --------------------------------------------------------------------------- #
-#                    ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ                                  #
-# --------------------------------------------------------------------------- #
 def _balance_by_oversampling(df: pd.DataFrame, label_col: str) -> pd.DataFrame:
-    """Делает классы ровными за счёт дублирования строк."""
+    """Balance classes by duplicating rows (simple random oversampling)."""
     counts = df[label_col].value_counts()
     max_cnt = counts.max()
-
     parts = []
     for lbl, cnt in counts.items():
         repeat = int(np.ceil(max_cnt / cnt))
@@ -52,7 +45,6 @@ def _balance_by_oversampling(df: pd.DataFrame, label_col: str) -> pd.DataFrame:
             .iloc[:max_cnt]
         )
         parts.append(part)
-
     return (
         pd.concat(parts, ignore_index=True)
         .sort_values("ts")
@@ -69,19 +61,14 @@ def _print_dist(name: str, y: np.ndarray):
     )
 
 
-# --------------------------------------------------------------------------- #
-#                              ГЛАВНАЯ ФУНКЦИЯ                                #
-# --------------------------------------------------------------------------- #
 def prepare_timesnet_dataset(
     df: pd.DataFrame,
     *,
     seq_len: int = 288,
     feature_cols: List[str] | None = None,
-    # --- целевая метка -------------------------------------------------
     target_col: str = "microtrend_label",
     shift_target: bool = False,
     horizon: int = 0,
-    # ------------------------------------------------------------------
     train_ratio: float = 0.8,
     scaler_path: str | pathlib.Path = "timesnet_scaler.pkl",
     train_dataset_path: str | pathlib.Path | None = None,
@@ -89,10 +76,17 @@ def prepare_timesnet_dataset(
     strict: bool = False,
 ) -> Tuple[TimesNetDataset, TimesNetDataset, StandardScaler]:
     """
-    Полная подготовка данных для TimesNet c ровным балансом классов.
+    End-to-end dataset preparation for TimesNet with balanced classes.
+    Steps:
+        1. Chronological sort.
+        2. Feature selection (numeric by default).
+        3. Missing value forward/back fill; drop remaining NaNs.
+        4. Stratified chronological split per class.
+        5. Oversample (duplicate) to balance class counts in train and test.
+        6. Fit StandardScaler on train features; transform splits.
+        7. Build PyTorch datasets with sliding windows.
+        8. Optionally save artifacts.
     """
-
-    # 1. Хронологический порядок
     df = df.sort_values("ts").reset_index(drop=True)
 
     if target_col not in df.columns:
@@ -102,7 +96,6 @@ def prepare_timesnet_dataset(
         df[target_col].shift(-horizon) if shift_target else df[target_col]
     )
 
-    # 2. Признаки
     if feature_cols is None:
         numeric = df.select_dtypes(include=[np.number]).columns
         feature_cols = [c for c in numeric if c != target_col]
@@ -118,15 +111,13 @@ def prepare_timesnet_dataset(
     if not feature_cols:
         raise ValueError("[TIMESNET] No usable feature columns left")
 
-    # 3. Пропуски
     df[feature_cols] = df[feature_cols].ffill().bfill()
     df = df.dropna(subset=feature_cols + ["timesnet_target"])
 
-    # 4. **Стратифицированный** сплит
     train_parts, test_parts = [], []
     for lbl, grp in df.groupby("timesnet_target"):
         grp = grp.sort_values("ts")
-        split = max(1, int(len(grp) * train_ratio))  # мин. 1 строка в test
+        split = max(1, int(len(grp) * train_ratio))
         train_parts.append(grp.iloc[:split])
         test_parts.append(grp.iloc[split:])
 
@@ -135,11 +126,9 @@ def prepare_timesnet_dataset(
 
     print(f"[TIMESNET] Split: train {len(train_df)}  /  test {len(test_df)}")
 
-    # 5. Балансировка
     train_df = _balance_by_oversampling(train_df, "timesnet_target")
     test_df = _balance_by_oversampling(test_df, "timesnet_target")
 
-    # 6. Скейлер
     scaler = StandardScaler().fit(train_df[feature_cols].astype("float32"))
     joblib.dump({"scaler": scaler, "features": feature_cols}, scaler_path)
     print(f"[TIMESNET] Scaler saved → {scaler_path}")
@@ -155,15 +144,13 @@ def prepare_timesnet_dataset(
     _print_dist("Train", y_train)
     _print_dist("Test ", y_test)
     print(
-        f"[TIMESNET] Windows: train {len(y_train)-seq_len} / "
-        f"test {len(y_test)-seq_len}"
+        f"[TIMESNET] Windows: train {len(y_train) - seq_len} / "
+        f"test {len(y_test) - seq_len}"
     )
 
-    # 7. PyTorch Datasets
     train_ds = TimesNetDataset(X_train, y_train, seq_len)
     test_ds = TimesNetDataset(X_test, y_test, seq_len)
 
-    # 8. (опц.) сохраняем
     if train_dataset_path:
         torch.save({"X": X_train, "y": y_train}, train_dataset_path)
         print(f"[TIMESNET] train.pt  → {train_dataset_path}")

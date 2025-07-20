@@ -19,7 +19,8 @@ from pipeline import (
     train_tft,
     print_dataset_overview,
     train_ppo,
-    expand_dataset
+    expand_dataset,
+    export_ppo_predictions
 )
 
 os.chdir(os.path.dirname(__file__))
@@ -80,7 +81,6 @@ def main() -> None:
     print(f"[MICROTREND] Assigned microtrend labels: {len(dist)} unique labels")
     print(f"[MAIN] Saved dataset.csv, imputed_events.pkl, and microtrend_distribution.json in {CACHE_DIR}")
 
-    # Wavelet + 1D-CNN
     print(f"[WAVECNN] Starting CNN dataset preparation")
     df_train_cnn, df_test_cnn, scaler_raw, scaler_wave = prepare_1dcnn_df(
         dataset,
@@ -131,9 +131,9 @@ def main() -> None:
     train_gru(
         train_pkl=CACHE_DIR / "gru_dataset_train.pkl",
         test_pkl=CACHE_DIR / "gru_dataset_test.pkl",
-        class_freqs_pt=CACHE_DIR / "class_freqs.pt",  # не используется внутри
-        events_pkl=CACHE_DIR / "imputed_events.pkl",  # не используется внутри
-        emb_path=CACHE_DIR / "cnn_embeddings.parquet",  # не используется внутри
+        class_freqs_pt=CACHE_DIR / "class_freqs.pt",
+        events_pkl=CACHE_DIR / "imputed_events.pkl",
+        emb_path=CACHE_DIR / "cnn_embeddings.parquet",
         model_out=CACHE_DIR / "gru_model.pt",
         emb_out=CACHE_DIR / "gru_embeddings.parquet",
         seq_len=96,
@@ -146,12 +146,11 @@ def main() -> None:
 
     print("[TIMESNET] DATA PREP STARTED")
 
-    # 3) Подготовка данных для TimesNet
     print("[TIMESNET] Preparing dataset")
     prepare_timesnet_dataset(
-        df=dataset,  # тот же DataFrame с microtrend_label
-        seq_len=288,  # окно ≈ 24 часа (5-мин свечи)
-        shift_target=False,  # текущее окно → текущий label
+        df=dataset,
+        seq_len=288,
+        shift_target=False,
         train_ratio=0.8,
         scaler_path=CACHE_DIR / "timesnet_scaler.pkl",
         train_dataset_path=CACHE_DIR / "timesnet_train.pt",
@@ -159,7 +158,6 @@ def main() -> None:
     )
     print("[TIMESNET] DATA PREP DONE")
 
-    # 4) Обучение TimesNet
     print("[TIMESNET] TRAINING STARTED")
     train_timesnet(
         train_pt=str(CACHE_DIR / "timesnet_train.pt"),
@@ -169,7 +167,7 @@ def main() -> None:
         embed_out=str(CACHE_DIR / "timesnet_embeddings.parquet"),
         forecast_out=str(CACHE_DIR / "timesnet_forecast.parquet"),
         seq_len=288,
-        epochs=10,
+        epochs=3,
         batch_size=256,
         lr=1e-3,
         device=None,
@@ -215,17 +213,25 @@ def main() -> None:
         step_size=5,
         gamma=0.5,
     )
-    print("[MAIN] Training completed.")
-    print("[MAIN] All steps completed successfully.")
-    exit()
+    print("[MAIN] TFT Training completed.")
 
     train_ppo(
         emb_path=CACHE_DIR / "tft_embeddings.parquet",
         csv_path=CSV_PATH,
         price_col="ohlcv_5m_close",
         model_out=CACHE_DIR / "ppo_trading.zip",
-        total_timesteps=20000,
+        total_timesteps=2000000,
     )
+    export_ppo_predictions(
+        emb_path=CACHE_DIR / r"tft_embeddings.parquet",
+        csv_path=CSV_PATH,
+        model_path=CACHE_DIR / r"ppo_trading",
+        price_col="ohlcv_5m_close",
+        out_csv=CACHE_DIR / "ppo_inference.csv",
+    )
+    print("[MAIN] All steps completed successfully.")
+
+
 
 
 if __name__ == "__main__":

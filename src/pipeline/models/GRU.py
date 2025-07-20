@@ -7,8 +7,8 @@ import torch.nn.functional as F
 
 class MicroTrendGRU(nn.Module):
     """
-    Двуслойный bidirectional-GRU + mean-pool + классификатор.
-    Выход: logits и сам hidden-вектор (B, D*2).
+    Two-layer bidirectional GRU (optional) with mean pooling and a classifier head.
+    Returns: logits and the pooled representation embedding with shape (B, D*2) if bidirectional else (B, D).
     """
 
     def __init__(
@@ -37,8 +37,8 @@ class MicroTrendGRU(nn.Module):
             nn.Linear(d_out, num_classes),
         )
 
-    def forward(self, x):                              # x: (B, L, F)
-        seq_out, _ = self.gru(x)                       # (B, L, D*dir)
-        emb = seq_out.mean(1)                          # mean-pool
-        logits = self.head(emb)                        # (B, C)
-        return logits, emb                             # emb пригодится как feature
+    def forward(self, x):
+        seq_out, _ = self.gru(x)
+        emb = seq_out.mean(1)
+        logits = self.head(emb)
+        return logits, emb
