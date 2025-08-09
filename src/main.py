@@ -222,13 +222,6 @@ def main() -> None:
         model_out=CACHE_DIR / "ppo_trading.zip",
         total_timesteps=2000000,
     )
-    export_ppo_predictions(
-        emb_path=CACHE_DIR / r"tft_embeddings.parquet",
-        csv_path=CSV_PATH,
-        model_path=CACHE_DIR / r"ppo_trading",
-        price_col="ohlcv_5m_close",
-        out_csv=CACHE_DIR / "ppo_inference.csv",
-    )
     print("[MAIN] All steps completed successfully.")
 
 

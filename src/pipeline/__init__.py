@@ -18,7 +18,7 @@ from .train_TFT import train_tft
 
 from .train_PPO import train_ppo
 
-from src.inference import export_ppo_predictions
+from .inference import export_ppo_predictions
 
 __all__ = [
     "print_dataset_overview",

@@ -170,8 +170,15 @@ cython_debug/
 /src.zip
 /src/check.py
 /src/dataset_small.csv
-/src/inference.py
-/src/output.csv
+/src/pipeline/inference.py
+/naeb/output.csv
 /src/output_res.csv
 /src/test_kelly_out.csv
 /src/test.py
+/naeb/XRPUSDT_merge_180d.csv
+/naeb/dumb_v3.py
+/src/dumb_v2.py
+/src/dumb_v1.py
+/src/180_d_output.csv
+/src/check_v2.py
+/naeb/
